@@ -15,13 +15,13 @@ let data:Dashboard|null=null,page=(location.hash.slice(1)||"overview"),machine="
 const root=document.querySelector<HTMLElement>("#app")!,overlay=document.querySelector<HTMLElement>("#overlay")!;
 let refreshPending=false;
 function badge(status:string){return `<span class="badge ${esc(status)}"><i></i>${esc(t(status as Key)??status)}</span>`;}
-function localFresh(){return !offline && !!data?.local.lastScanAt && Date.now()-Date.parse(data.local.lastScanAt)<240000;}
+function localFresh(){return !offline && !!data?.local.lastScanAt && Date.now()-Date.parse(data.local.lastScanAt)<(data.local.staleAfterMs??240000);}
 function checks():Listed[]{if(!data)return[];return [...data.local.checks.map(c=>({...c,machine:data!.local.machine,remote:false,...(!localFresh()?{status:"unknown" as Status,detail:t("stale")}: {})})),...data.peers.flatMap(p=>(p.snapshot?.checks??[]).map(c=>({...c,machine:p.name,remote:true,...(p.status==="unknown"?{status:"unknown" as Status,detail:p.error??t("stale")}: {})})))].filter(c=>machine==="all"||c.machine===machine);}
 function incidents(){if(!data)return[];return [...data.local.incidents.map(i=>({...i,machine:data!.local.machine,remote:false})),...data.peers.flatMap(p=>(p.snapshot?.incidents??[]).map(i=>({...i,machine:p.name,remote:true})))].filter(i=>machine==="all"||i.machine===machine).sort((a,b)=>b.openedAt.localeCompare(a.openedAt));}
 async function request(path:string,method="GET",body?:unknown){const r=await fetch(path,{method,headers:body===undefined?{}:{"content-type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error??`HTTP ${r.status}`);return d;}
 function toast(message:string){const el=document.querySelector<HTMLElement>("#toast")!;el.textContent=message;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),3500);}
 async function load(){if(refreshPending)return;refreshPending=true;try{data=await request("/api/dashboard");offline=false;}catch{offline=true;}finally{refreshPending=false;}if(!document.querySelector("dialog[open]")&&!root.contains(document.activeElement?.closest("input,select,textarea")??null))render();}
-function navigate(p:string){page=p;location.hash=p;filter="all";query="";render();}
+function navigate(p:string){root.classList.remove("nav-open");page=p;location.hash=p;filter="all";query="";render();}
 function render(){
   if(!["overview","checks","incidents","settings"].includes(page))page="overview";
   const cs=checks(),active=incidents().filter(i=>i.status!=="resolved").length;
@@ -61,7 +61,7 @@ function showIncident(id:string,host:string){const i=incidents().find(i=>i.id===
 async function act(fn:()=>Promise<void>){try{await fn();}catch(e){toast((e as Error).message||t("error"));}}
 function bind(){
   root.querySelectorAll<HTMLElement>("[data-page],[data-view]").forEach(el=>el.onclick=()=>navigate(el.dataset.page??el.dataset.view!));
-  root.querySelectorAll<HTMLElement>("[data-machine]").forEach(el=>el.onclick=()=>{machine=el.dataset.machine!;render();});
+  root.querySelectorAll<HTMLElement>("[data-machine]").forEach(el=>el.onclick=()=>{machine=el.dataset.machine!;root.classList.remove("nav-open");render();});
   root.querySelectorAll<HTMLElement>("[data-filter]").forEach(el=>el.onclick=()=>{filter=el.dataset.filter!;render();});
   root.querySelectorAll<HTMLElement>("[data-check]").forEach(el=>el.onclick=()=>void showCheck(el.dataset.check!,el.dataset.host!));
   root.querySelectorAll<HTMLElement>("[data-incident]").forEach(el=>el.onclick=()=>showIncident(el.dataset.incident!,el.dataset.host!));

@@ -69,11 +69,13 @@ export class Store {
     const cs = this.list<Check>("check");
     this.db.query("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)").run(now, cs.filter(c=>c.status === "healthy").length, cs.filter(c=>["failing","pending","recovering"].includes(c.status)).length, cs.filter(c=>c.status === "unknown").length);
   }
-  snapshot(machine: string, now = Date.now()): Snapshot {
+  snapshot(machine: string, now = Date.now(), staleAfterMs = 240_000): Snapshot {
     const last = this.get<number>("meta", "scan");
     const checks = this.list<Check>("check").map(c => c.status !== "paused" && now - Date.parse(c.observedAt) > (c.staleAfterMs ?? 180_000) ? { ...c, status: "unknown" as const, code: "stale_observation", detail: "Observation expired; awaiting a fresh probe" } : c);
     const history = (this.db.query("SELECT * FROM scans ORDER BY at DESC LIMIT 48").all() as { at: number; passing: number; failing: number; unknown: number }[]).reverse().map(r => ({ ...r, at: new Date(r.at).toISOString() }));
-    return { version: 1, machine, generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, checks, incidents: this.list<Incident>("incident").sort((a,b)=>b.openedAt.localeCompare(a.openedAt)).slice(0,300), history };
+    const all=this.list<Incident>("incident").sort((a,b)=>b.openedAt.localeCompare(a.openedAt));
+    const incidents=[...all.filter(i=>i.status!=="resolved"),...all.filter(i=>i.status==="resolved").slice(0,100)];
+    return { version: 1, machine, generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history };
   }
   history(id: string) { return (this.db.query("SELECT at,verdict,code,latency FROM observations WHERE check_id=? ORDER BY at DESC LIMIT 60").all(id) as { at: number }[]).map(r=>({ ...r, at: new Date(r.at).toISOString() })); }
   prune(days: number, now = Date.now()) { const before = now - days * 86_400_000; this.db.query("DELETE FROM observations WHERE at<?").run(before); this.db.query("DELETE FROM scans WHERE at<?").run(before); }

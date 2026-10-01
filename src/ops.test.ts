@@ -43,6 +43,11 @@ describe("Incident lifecycle",()=>{
     expect(s.snapshot("local",at+181000).checks[0]?.status).toBe("unknown");
     expect(s.get<{status:string}>("check","one")?.status).toBe("healthy");
   });
+  test("snapshot advertises collector expiry independently of probe intervals",()=>{
+    const s=store();s.finishScan(at);
+    expect(s.snapshot("local",at,600000).staleAfterMs).toBe(600000);
+    expect(s.snapshot("local",at).lastScanAt).toBe(new Date(at).toISOString());
+  });
   test("pausing never resolves an open incident",()=>{
     const s=store();s.observe({...sample,failAfter:1},at);s.control("one",{enabled:false},at+1);
     expect(s.observe({...sample,verdict:"pass"},at+2000).status).toBe("paused");

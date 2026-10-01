@@ -11,6 +11,7 @@ export class Engine {
   stop() { this.stopped = true; clearTimeout(this.timer); }
   scan(): Promise<void> { if (this.running) return this.running; this.running = this.collect().finally(()=>{this.running=null;}); return this.running; }
   busy() { return !!this.running; }
+  snapshot() { return this.store.snapshot(this.config.machine,Date.now(),Math.max(240_000,this.config.intervalMs*4)); }
   private async collect() {
     const settings = this.store.settings(), now = Date.now();
     const seen = new Set<string>();
@@ -47,7 +48,8 @@ export class Engine {
           try {
             const snap = await readJson(p.url,10000,this.fetcher) as Snapshot;
             if (snap.version !== 1 || !Array.isArray(snap.checks) || !Array.isArray(snap.incidents) || typeof snap.machine !== "string" || !Number.isFinite(Date.parse(snap.generatedAt))) throw new Error("Invalid snapshot");
-            if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>240_000 || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("Peer scan expired or clock differs");
+            const lease=Number.isFinite(snap.staleAfterMs)&&snap.staleAfterMs>=60_000&&snap.staleAfterMs<=14_400_000?snap.staleAfterMs:240_000;
+            if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("Peer scan expired or clock differs");
             this.store.put("peer",p.name,{name:p.name,status:"healthy",snapshot:snap,receivedAt:new Date().toISOString()} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"pass",code:"peer_ok",detail:"Peer collector is reporting fresh observations"});
           } catch {
@@ -73,7 +75,7 @@ export class Engine {
     this.store.finishScan(); this.store.prune(this.config.retentionDays);
     await this.deliver();
   }
-  peers(now=Date.now()): PeerView[] { return this.store.list<PeerView>("peer").map(p=>p.receivedAt && now-Date.parse(p.receivedAt)<=240_000 ? p : {...p,status:"unknown",error:"Peer snapshot expired"}); }
+  peers(now=Date.now()): PeerView[] { return this.store.list<PeerView>("peer").map(p=>p.receivedAt && now-Date.parse(p.receivedAt)<=Math.max(240_000,this.config.intervalMs*4) ? p : {...p,status:"unknown",error:"Peer snapshot expired"}); }
   async deliver() {
     if (!this.store.settings().notifications || !this.config.appToken) return;
     const rows = this.store.db.query("SELECT * FROM outbox WHERE next_at<=? AND attempts<10 ORDER BY next_at LIMIT 5").all(Date.now()) as {id:string;body:string;attempts:number}[];
