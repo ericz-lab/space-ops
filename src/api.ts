@@ -10,7 +10,11 @@ export function api(engine: Engine) {
     try {
       if (!["GET","HEAD"].includes(req.method)) {
         // Require a browser same-origin JSON request; no ambient cross-site writes.
-        if (req.headers.get("origin") !== url.origin || req.headers.get("sec-fetch-site") === "cross-site") return json({ok:false,error:"Same-origin requests required"},403);
+        let origin: URL;
+        try { origin=new URL(req.headers.get("origin")??""); } catch { return json({ok:false,error:"Same-origin requests required"},403); }
+        // TLS terminates at the trusted Space ingress. Preserve host/port matching
+        // without assuming that the loopback request still has an HTTPS scheme.
+        if (!["http:","https:"].includes(origin.protocol) || origin.host !== url.host || req.headers.get("sec-fetch-site") === "cross-site") return json({ok:false,error:"Same-origin requests required"},403);
         if (!(req.headers.get("content-type")??"").startsWith("application/json")) return json({ok:false,error:"JSON required"},415);
         if (Number(req.headers.get("content-length")??0)>32768) return json({ok:false,error:"Request too large"},413);
       }

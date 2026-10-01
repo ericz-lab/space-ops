@@ -128,9 +128,11 @@ describe("Collector and API",()=>{
     const request=(origin?:string)=>new Request("http://ops.test/api/rules",{method:"POST",headers:{"content-type":"application/json",...(origin?{origin}:{})},body:JSON.stringify({name:"API",url:"http://example.test"})});
     expect((await handler(request())).status).toBe(403);
     expect((await handler(request("http://evil.test"))).status).toBe(403);
+    expect((await handler(request("https://ops.test:444"))).status).toBe(403);
     expect((await handler(request("http://ops.test"))).status).toBe(201);
+    expect((await handler(request("https://ops.test"))).status).toBe(201);
     await new Promise(r=>setTimeout(r,20));
-    expect(s.rules()).toHaveLength(1);
+    expect(s.rules()).toHaveLength(2);
   });
 });
 type CheckLike={status:string};
