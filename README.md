@@ -59,3 +59,7 @@ Mutation endpoints require JSON and an HTTP(S) Origin matching the request host 
 ## Deployment
 
 Set up the public Access policy before registering the app (the wildcard router exposes new apps automatically). Run `bash deploy/bootstrap.sh <ssh-host>` from this checkout after `bun run check`; it installs a bare Git receiver and the repeatable hook, pushes main, and lets Space provision and supervise the service. Subsequent deployments are `git push <remote> main`. The hook installs locked dependencies before restarting and validates `/healthz` afterwards. See AGENTS.md for host-specific operator notes.
+
+### Recovery after completion outside the scheduler
+
+An HTTP rule can explicitly map to a local task using `recoveryTaskId` and `evidenceTimestampPath` (for example `$.latest.finishedAt`). It must contain success assertions. A fresh, enabled, passing rule with a valid completion timestamp **newer than** the task's failed/skipped execution supplies recovery evidence. Normal consecutive-pass thresholds then close the incident and keep the evidence in its history. A newer task failure invalidates older completion evidence. Unreachable, paused, failed, expired or invalid evidence cannot recover a task; overdue and stalled checks cannot be overridden. Running alone is unknown, not recovery. This mapping is configuration, with no app-specific logic in the collector.

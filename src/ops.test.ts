@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
-import { httpProbe, taskSample, type Task } from "./probes.ts";
+import { httpProbe, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
 import { DEFAULT_SETTINGS, type Sample } from "./types.ts";
@@ -141,3 +141,46 @@ describe("Collector and API",()=>{
   });
 });
 type CheckLike={status:string};
+
+
+test("recovery requires newer, fresh, enabled and verified evidence and keeps incident history", async () => {
+  const s=store();
+  const rule=validateRule({name:"Completion",url:"http://example.test/status",recoveryTaskId:"task-1",evidenceTimestampPath:"$.finishedAt",assertions:[{path:"$.ok",operator:"eq",value:true}]});
+  const failed:Sample={...sample,id:"task:task-1",kind:"task",code:"task_errors",evidenceAt:new Date(at-60000).toISOString(),failAfter:1};
+  s.observe(failed,at);
+  const evidence=await httpProbe(rule,mockFetch(()=>({ok:true,finishedAt:new Date(at-1000).toISOString()})),at);
+  const check=s.observe(evidence,at);
+  const recovered=withRecoveryEvidence(failed,[rule],[check],at);
+  expect(recovered.code).toBe("task_recovered_evidence");
+  expect(s.observe(recovered,at+1).status).toBe("recovering");
+  expect(s.observe(recovered,at+2).status).toBe("healthy");
+  expect(s.snapshot("test",at+2).incidents[0]?.events.at(-1)?.type).toBe("resolved");
+  for (const bad of [{...check,enabled:false},{...check,status:"unknown" as const},{...check,observedAt:new Date(at-900000).toISOString()},{...check,evidenceAt:failed.evidenceAt}]) expect(withRecoveryEvidence(failed,[rule],[bad],at).verdict).toBe("fail");
+  expect(withRecoveryEvidence({...failed,evidenceAt:new Date(at).toISOString()},[rule],[check],at).verdict).toBe("fail");
+  expect(withRecoveryEvidence({...failed,code:"task_stalled"},[rule],[check],at).verdict).toBe("fail");
+  expect(withRecoveryEvidence(failed,[{...rule,enabled:false}],[check],at).verdict).toBe("fail");
+  for (const finishedAt of [null,"2026-02-30T00:00:00Z",new Date(at+120000).toISOString()]) expect((await httpProbe(rule,mockFetch(()=>({ok:true,finishedAt})),at)).verdict).toBe("unknown");
+  expect(()=>validateRule({name:"Bad",url:"http://example.test",recoveryTaskId:"task-1"})).toThrow();
+});
+
+test("a running task cannot close an existing incident",()=>{
+  const s=store();
+  const failed:Sample={...sample,id:"task:task-1",failAfter:1};s.observe(failed,at);
+  const t:Task={id:"task-1",app:"test",name:"sync",enabled:true,orphaned:false,timeoutMs:60000,state:{runningAt:new Date(at-1000).toISOString()}};
+  const observation=taskSample(t,DEFAULT_SETTINGS,at);
+  expect(observation.verdict).toBe("unknown");
+  s.observe(observation,at+1);s.observe(observation,at+2);
+  expect(s.activeIncident(t.id ? `task:${t.id}` : "")?.status).toBe("open");
+});
+
+
+test("successful execution with partial failures still opens a separate quality incident",async()=>{
+  const s=store();
+  const quality=validateRule({name:"Symbol completeness",url:"http://example.test/status",failAfter:1,recoverAfter:2,assertions:[{path:"$.status",operator:"eq",value:"ok"},{path:"$.failed",operator:"eq",value:0}]});
+  const partial=await httpProbe(quality,mockFetch(()=>({status:"ok",failed:34})),at);
+  expect(partial.verdict).toBe("fail");expect(partial.detail).toContain("34");
+  expect(s.observe(partial,at).status).toBe("failing");
+  const complete=await httpProbe(quality,mockFetch(()=>({status:"ok",failed:0})),at+1);
+  expect(s.observe(complete,at+1).status).toBe("recovering");
+  expect(s.observe(complete,at+2).status).toBe("healthy");
+});

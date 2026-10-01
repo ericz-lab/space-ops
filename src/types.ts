@@ -5,6 +5,7 @@ export type Assertion = { path: string; operator: Operator; value?: string | num
 export type Rule = {
   id: string; name: string; kind: "http"; url: string; app: string; enabled: boolean;
   intervalMs: number; timeoutMs: number; failAfter: number; recoverAfter: number;
+  recoveryTaskId?: string; evidenceTimestampPath?: string;
   expectedStatus: number; assertions: Assertion[]; severity: "warning" | "critical";
 };
 export type Sample = { id: string; name: string; app: string; kind: string; verdict: Verdict; code: string; detail: string; value?: number | string; threshold?: number | string; latencyMs?: number; evidenceAt?: string; coverage: "availability" | "execution" | "assertion" | "host"; failAfter?: number; recoverAfter?: number; severity?: "warning" | "critical"; staleAfterMs?: number };

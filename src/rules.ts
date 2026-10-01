@@ -22,7 +22,12 @@ export function validateRule(raw: unknown, id: string = crypto.randomUUID()): Ru
     if (["lt", "gt", "ageLessThan"].includes(a.operator) && (typeof a.value !== "number" || !Number.isFinite(a.value) || (a.operator === "ageLessThan" && a.value <= 0))) throw new Error("Numeric assertions need a finite threshold (age in milliseconds)");
     if (a.operator === "eq" && !["string", "number", "boolean"].includes(typeof a.value)) throw new Error("Equality needs a string, number, or boolean");
   }
-  return { id, kind: "http", name, url: url.href, app: String(r.app ?? "custom").slice(0, 80), enabled: r.enabled !== false,
+  const recoveryTaskId = typeof r.recoveryTaskId === "string" ? r.recoveryTaskId.trim() : "";
+  const evidenceTimestampPath = typeof r.evidenceTimestampPath === "string" ? r.evidenceTimestampPath.trim() : "";
+  if (recoveryTaskId || evidenceTimestampPath) {
+    if (!/^[a-zA-Z0-9-]{1,100}$/.test(recoveryTaskId) || !/^\$(?:\.[a-zA-Z0-9_-]+|\[\d+\])+$/.test(evidenceTimestampPath) || evidenceTimestampPath.length > 200 || !assertions.length) throw new Error("Recovery requires a local task ID, completion timestamp path and success assertions");
+  }
+  return { id, kind: "http", ...(recoveryTaskId ? { recoveryTaskId, evidenceTimestampPath } : {}), name, url: url.href, app: String(r.app ?? "custom").slice(0, 80), enabled: r.enabled !== false,
     intervalMs: integer(r.intervalMs, 60_000, 15_000, 86_400_000, "intervalMs"), timeoutMs: integer(r.timeoutMs, 5000, 500, 30_000, "timeoutMs"),
     failAfter: integer(r.failAfter, 3, 1, 20, "failAfter"), recoverAfter: integer(r.recoverAfter, 2, 1, 20, "recoverAfter"),
     expectedStatus: integer(r.expectedStatus, 200, 200, 599, "expectedStatus"), severity: r.severity === "critical" ? "critical" : "warning", assertions: assertions as Assertion[] };
@@ -53,7 +58,7 @@ export function assertionsResult(data: unknown, assertions: Assertion[], now: nu
       if (age < -60_000) return { verdict: "unknown", code: "clock_skew", detail: `${a.path}: timestamp is in the future` };
       pass = age < Number(a.value);
     }
-    if (!pass) return { verdict: "fail", code: "assertion_failed", detail: `${a.path} ${a.operator} ${JSON.stringify(a.value)}: assertion failed` };
+    if (!pass) return { verdict: "fail", code: "assertion_failed", detail: `${a.path} ${a.operator} ${JSON.stringify(a.value)}: assertion failed (actual: ${JSON.stringify(actual).slice(0, 160)})` };
   }
   return { verdict: "pass", code: "assertions_passed", detail: `${assertions.length} assertions passed` };
 }

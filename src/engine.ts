@@ -1,5 +1,5 @@
 import { Store } from "./store.ts";
-import { hostSamples, httpProbe, readJson, taskSample, type Task } from "./probes.ts";
+import { hostSamples, httpProbe, readJson, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import type { Check, PeerView, Sample, Snapshot } from "./types.ts";
 
 export class Engine {
@@ -15,6 +15,7 @@ export class Engine {
   private async collect() {
     const settings = this.store.settings(), now = Date.now();
     const seen = new Set<string>();
+    const taskSamples: Sample[] = [];
     const observe = (s: Sample) => { seen.add(s.id); this.store.observe({ staleAfterMs: this.config.intervalMs*3+60_000, ...s }); };
     const get = (path: string) => readJson(this.config.api + path, 8000, this.fetcher);
     const source = async (name: string, work: ()=>Promise<void>) => {
@@ -36,7 +37,7 @@ export class Engine {
           if (t.state.lastStatus === "skipped") {
             try { const r = await get(`/api/tasks/${encodeURIComponent(t.id)}/runs?limit=3`); if (Array.isArray(r.runs) && r.runs.length === 3 && r.runs.every((v:{status:string})=>v.status === "skipped")) s = { ...s,verdict:"fail",code:"task_repeated_skip",detail:"Three consecutive executions were skipped" }; } catch { /* Keep the unknown result when history is unavailable. */ }
           }
-          observe(s);
+          taskSamples.push(s);
         });
       }),
       source("peers", async () => {
@@ -68,6 +69,7 @@ export class Engine {
         observe(await httpProbe(rule,this.fetcher));
       })
     ]);
+    for (const sample of taskSamples) observe(withRecoveryEvidence(sample, this.store.rules(), this.store.list<Check>("check"), now));
     for (const check of this.store.list<Check>("check")) {
       if (seen.has(check.id) || check.status === "paused") continue;
       observe({...check,verdict:"unknown",code:"not_observed",detail:"Resource is absent, disabled, or its discovery source is unavailable"});
