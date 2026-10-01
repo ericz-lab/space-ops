@@ -1,0 +1,29 @@
+# Space Ops — agent guide
+
+Read README.md before changing behavior. Motivation and scope: GitHub issue #1.
+
+## Rules
+
+- Bun 1.3+, strict TypeScript, ESM with `.ts` imports. No runtime dependencies.
+- English code and documentation; all UI strings have English and Chinese translations.
+- General-purpose probes only. Never hardcode an application's business policy or machine name in detection code.
+- Unknown, stale, disabled and absent data must never be reported as healthy. Execution success does not establish business success.
+- Preserve incident history. Acknowledgement, mute and pause never resolve a fault. Recovery requires new passing evidence.
+- Observations and incidents are local to their collector. Peer snapshots are read-only, nonrecursive and marked stale on loss.
+- HTTP probes are GET-only, bounded, do not follow redirects, and never forward Space credentials to their targets.
+- Bind loopback. Browser writes require same-origin JSON. Public deployment requires an access policy before registration.
+- Follow ai-space docs/time.md: UTC instants in API, explicit units, browser timezone for display.
+- Run `bun run check` before every push. Commit messages follow Conventional Commits.
+
+## Repository map
+
+- `src/`: schema, reusable rules/probes, collector, API and colocated tests.
+- `web/`: Apple-inspired responsive UI, English/Chinese dictionaries, HTML bundled by Bun.
+- `deploy/`: repeatable Git deployment bootstrap and post-receive hook.
+- `.githooks/`: pre-push validation hook (`git config core.hooksPath .githooks`).
+- `data/`: ignored local development database.
+- `artifacts/`: ignored screenshots and validation output.
+
+## Deployment
+
+Source: `~/.ai-space/app-src/space-ops`. Hosts: seoul (`seoul`) and david (`david`). Port 8998 is free on both hosts at bootstrap. The deployed checkout is `${SPACE_HOME:-$HOME/.ai-space}/apps/space-ops`; a bare repository at `~/space-ops.git` receives pushes. Space manages `space-space-ops.service`. Use `git push seoul main` / `git push david main` after validation; never edit the deployed source. Machine identities and peer URLs are environment configuration, never embedded in probes.

@@ -1,0 +1,25 @@
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { hostname } from "node:os";
+import page from "../web/index.html";
+import { Store } from "./store.ts";
+import { Engine } from "./engine.ts";
+import { api } from "./api.ts";
+
+const dir=process.env.SPACE_APP_DATA_DIR || join(import.meta.dir,"../data");
+mkdirSync(dir,{recursive:true});
+const database=process.env.DATABASE_URL?.replace(/^sqlite:\/\//,"") || join(dir,"main.db");
+mkdirSync(dirname(database),{recursive:true});
+const store=new Store(database);
+const intervalMs=Number(process.env.OPS_INTERVAL_MS??60000),retentionDays=Number(process.env.OPS_RETENTION_DAYS??30);
+if(!Number.isFinite(intervalMs)||intervalMs<15000||intervalMs>3600000)throw new Error("OPS_INTERVAL_MS must be 15000–3600000");
+if(!Number.isInteger(retentionDays)||retentionDays<1||retentionDays>365)throw new Error("OPS_RETENTION_DAYS must be 1–365");
+const peers=JSON.parse(process.env.OPS_PEERS??"[]") as {name:string;url:string}[];
+if(!Array.isArray(peers)||peers.some(p=>typeof p.name!=="string"||!/^https?:\/\//.test(p.url)))throw new Error("Invalid OPS_PEERS");
+const engine=new Engine(store,{api:(process.env.SPACE_API_URL??"http://127.0.0.1:8700").replace(/\/$/,""),machine:process.env.SPACE_NAME||hostname(),dataDir:dir,intervalMs,retentionDays,appToken:process.env.SPACE_APP_TOKEN,peers});
+const handler=api(engine);
+const server=Bun.serve({hostname:"127.0.0.1",port:Number(process.env.PORT??8998),maxRequestBodySize:32768,routes:{"/":page,"/icon.svg":()=>new Response(Bun.file(join(import.meta.dir,"../icon.svg"))),"/healthz":handler,"/api/*":handler},fetch:()=>new Response("Not found",{status:404}),development:process.env.SPACE_DEV==="1"});
+engine.start();
+console.log(`Space Ops listening on ${server.url}`);
+process.on("SIGTERM",()=>{engine.stop();server.stop(true);store.db.close();process.exit(0);});
+process.on("SIGINT",()=>{engine.stop();server.stop(true);store.db.close();process.exit(0);});

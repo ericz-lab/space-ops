@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$HOME/.bun/bin:$HOME/.local/bin:$PATH"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+unset GIT_DIR GIT_WORK_TREE
+APP=space-ops
+WS=${SPACE_HOME:-$HOME/.ai-space}
+BARE="$HOME/$APP.git"
+WORK="$WS/apps/$APP"
+deploy=false
+while read -r old new ref; do
+  if [[ "$ref" == refs/heads/main && "$new" != 0000000000000000000000000000000000000000 ]]; then deploy=true; fi
+done
+[[ "$deploy" == true ]] || exit 0
+if [[ ! -d "$WORK/.git" ]]; then
+  [[ ! -e "$WORK" ]] || { echo 'Refusing to replace an existing non-Git deployment'; exit 1; }
+  git clone --branch main "$BARE" "$WORK"
+else
+  [[ "$(git -C "$WORK" remote get-url origin)" == "$BARE" ]] || { echo 'Unexpected deployment origin'; exit 1; }
+  git -C "$WORK" fetch origin main
+  git -C "$WORK" reset --hard origin/main
+fi
+cd "$WORK"
+bun install --production --frozen-lockfile
+if [[ ! -f .env ]]; then
+  bun -e 'const f=await Bun.file(process.env.HOME+"/.ai-space/.env").text(); const name=f.match(/^SPACE_NAME=(.*)$/m)?.[1]?.replace(/^["\x27]|["\x27]$/g,"") || (await import("node:os")).hostname(); await Bun.write(".env", "SPACE_NAME="+name+"\n");'
+  chmod 600 .env
+fi
+space app sync
+space app restart "$APP"
+for attempt in $(seq 1 20); do
+  if curl -fsS --max-time 3 http://127.0.0.1:8998/healthz >/dev/null; then echo 'Space Ops collector healthy'; exit 0; fi
+  sleep 2
+done
+echo 'Collector did not become healthy; inspect journalctl --user -u space-space-ops'
+exit 1

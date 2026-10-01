@@ -1,0 +1,26 @@
+spec: 1
+name: space-ops
+title: Space Ops
+description: Monitor services, tasks and data with reusable checks, incident evidence and peer visibility.
+icon: icon.svg
+url: /
+status: active
+repo: https://github.com/ericz-lab/space-ops.git
+i18n:
+  zh:
+    title: 运维中心
+    description: 通用巡检、数据断言与故障追踪，统一查看本机及 peer 的运行状态。
+service:
+  command: bun src/index.ts
+  port: 8998
+  health: /healthz
+storage:
+  database: sqlite
+widgets:
+  - name: status
+    title: Operations
+    kind: items
+    source: /api/widget
+    link: /
+    size: 2x1
+    refresh: 60s
