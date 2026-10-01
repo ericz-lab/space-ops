@@ -184,3 +184,9 @@ test("successful execution with partial failures still opens a separate quality 
   expect(s.observe(complete,at+1).status).toBe("recovering");
   expect(s.observe(complete,at+2).status).toBe("healthy");
 });
+
+
+test("recovery evidence must postdate the failed attempt end",()=>{
+  const result=taskSample({id:"task-1",app:"test",name:"sync",enabled:true,orphaned:false,timeoutMs:60000,state:{lastStatus:"error",lastRunAt:"2026-10-01T09:00:00Z",lastDurationMs:300000,consecutiveErrors:3}},DEFAULT_SETTINGS,at);
+  expect(result.evidenceAt).toBe("2026-10-01T09:05:00.000Z");
+});
