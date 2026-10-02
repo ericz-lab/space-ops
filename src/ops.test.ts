@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
-import { httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
+import { declaredNoop, httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
 import { DEFAULT_SETTINGS, type Sample } from "./types.ts";
@@ -316,6 +316,20 @@ describe("Repeated skips",()=>{
   test("skips with no success in a day are a failure",()=>{
     expect(repeatedSkip([skip(0),skip(.5),skip(1),{status:"ok",startedAt:at(30),endedAt:at(30)}],now)).toBe(true);
     expect(repeatedSkip([skip(0),skip(.5),skip(1)],now)).toBe(true);
+  });
+  const closed=(h:number)=>({...skip(h),output:JSON.stringify({status:"skipped",reason:"market_closed"})});
+  test("a skip that declares a reason and no error is a planned no-op",()=>{
+    expect(declaredNoop(closed(0))).toBe("market_closed");
+    expect(declaredNoop({...closed(0),error:"already running"})).toBeUndefined();
+    expect(declaredNoop(skip(0))).toBeUndefined();
+    expect(repeatedSkip([closed(0),closed(24),closed(48)],now)).toBe(false);
+  });
+  test("a holiday skip is healthy even under an error threshold of one",async()=>{
+    const s=store(),t:Task={id:"cn",app:"picker",name:"daily-sync",enabled:true,orphaned:false,timeoutMs:60000,state:{lastStatus:"skipped",lastRunAt:new Date().toISOString(),lastDurationMs:5}};
+    s.put("taskPolicy","cn",{errorThreshold:1});
+    await new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(url=>url.endsWith("services")?{services:[]}:url.endsWith("/api/tasks")?{tasks:[t]}:url.includes("/runs")?{runs:[closed(0)]}:{peers:[]})).scan();
+    expect(s.get<CheckLike>("check","task:cn")?.status).toBe("healthy");
+    expect(s.activeIncident("task:cn")).toBeUndefined();
   });
   test("fewer than three skips is not repeated",()=>{
     expect(repeatedSkip([skip(0),skip(.5),{status:"error"}],now)).toBe(false);

@@ -1,5 +1,5 @@
 import { Store } from "./store.ts";
-import { hostSamples, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
+import { declaredNoop, hostSamples, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import type { Check, PeerView, Sample, Snapshot, TaskPolicy } from "./types.ts";
 
 export class Engine {
@@ -44,7 +44,9 @@ export class Engine {
         await pool(tasks, 4, async t => {
           let s = taskSample(t,settings,now,this.store.get<TaskPolicy>("taskPolicy",t.id) ?? {});
           if (t.state.lastStatus === "skipped") {
-            try { const r = await get(`/api/tasks/${encodeURIComponent(t.id)}/runs?limit=50`); if (Array.isArray(r.runs) && repeatedSkip(r.runs,now)) s = { ...s,verdict:"fail",transient:false,code:"task_repeated_skip",detail:"Three consecutive executions were skipped and none succeeded in 24 hours" }; } catch { /* Keep the unknown result when history is unavailable. */ }
+            try { const r = await get(`/api/tasks/${encodeURIComponent(t.id)}/runs?limit=50`); const noop = Array.isArray(r.runs) && r.runs[0] ? declaredNoop(r.runs[0]) : undefined;
+              if (noop) s = { ...s,verdict:"pass",transient:undefined,failAfter:undefined,code:"task_noop",detail:`Latest execution was skipped by design (${noop})` };
+              else if (Array.isArray(r.runs) && repeatedSkip(r.runs,now)) s = { ...s,verdict:"fail",transient:false,code:"task_repeated_skip",detail:"Three consecutive executions were skipped and none succeeded in 24 hours" }; } catch { /* Keep the unknown result when history is unavailable. */ }
           }
           taskSamples.push(s);
         });

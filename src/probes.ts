@@ -55,9 +55,14 @@ export function taskSample(t: Task, settings: Settings, now = Date.now(), policy
   return base;
 }
 // A no-op run ("inputs unchanged") is normal for a polling task; skips count only once nothing has succeeded for a day.
-export type TaskRun = { status: string; startedAt?: number; endedAt?: number };
+export type TaskRun = { status: string; startedAt?: number; endedAt?: number; error?: string; output?: string };
+// A skip answering a `reason` and no error is planned (market closed, holiday): not a failure, not a missed run.
+export function declaredNoop(r: TaskRun): string | undefined {
+  if (r.status !== "skipped" || r.error) return undefined;
+  try { const v = JSON.parse(r.output ?? ""); return typeof v?.reason === "string" && v.reason ? v.reason : undefined; } catch { return undefined; }
+}
 export function repeatedSkip(runs: TaskRun[], now = Date.now()): boolean {
-  if (runs.length < 3 || !runs.slice(0, 3).every(r => r.status === "skipped")) return false;
+  if (runs.length < 3 || !runs.slice(0, 3).every(r => r.status === "skipped" && !declaredNoop(r))) return false;
   const ok = runs.find(r => r.status === "ok"), at = ok?.endedAt ?? ok?.startedAt;
   return !Number.isFinite(at) || now - at! > 86_400_000;
 }
