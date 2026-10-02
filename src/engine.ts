@@ -1,22 +1,31 @@
 import { Store } from "./store.ts";
 import { hostSamples, httpProbe, readJson, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
-import type { Check, PeerView, Sample, Snapshot } from "./types.ts";
+import type { Check, PeerView, Sample, Snapshot, TaskPolicy } from "./types.ts";
 
 export class Engine {
   private running: Promise<void> | null = null;
   private timer?: ReturnType<typeof setTimeout>;
-  private stopped = false;
-  constructor(readonly store: Store, readonly config: { api: string; machine: string; dataDir: string; intervalMs: number; retentionDays: number; appToken?: string; peers?: { name: string; url: string }[] }, private fetcher: typeof fetch = fetch) {}
-  start() { this.stopped = false; const tick = async () => { try { await this.scan(); } catch (e) { console.error("[ops] scan failed", e instanceof Error ? e.message : "unknown"); } if (!this.stopped) this.timer = setTimeout(tick, this.config.intervalMs); }; void tick(); }
+  private stopped = true;
+  private tickAt = 0;
+  constructor(readonly store: Store, readonly config: { api: string; machine: string; dataDir: string; retentionDays: number; appToken?: string; peers?: { name: string; url: string }[] }, private fetcher: typeof fetch = fetch) {}
+  /** Scan cadence from Settings, so the operator changes it without a restart. */
+  intervalMs() { return this.store.settings().scanMinutes * 60_000; }
+  /** How long a scan stays current: four cadences, never under four minutes. */
+  leaseMs() { return Math.max(240_000, this.intervalMs() * 4); }
+  nextScanAt() { return this.stopped || !this.tickAt ? null : new Date(this.tickAt + this.intervalMs()).toISOString(); }
+  start() { this.stopped = false; void this.tick(); }
   stop() { this.stopped = true; clearTimeout(this.timer); }
+  /** Re-arm the timer after a cadence change; the next scan is due one new interval after the last one started. */
+  reschedule() { if (this.stopped) return; clearTimeout(this.timer); this.timer = setTimeout(() => void this.tick(), Math.max(1000, this.tickAt + this.intervalMs() - Date.now())); }
+  private async tick() { this.tickAt = Date.now(); try { await this.scan(); } catch (e) { console.error("[ops] scan failed", e instanceof Error ? e.message : "unknown"); } this.reschedule(); }
   scan(): Promise<void> { if (this.running) return this.running; this.running = this.collect().finally(()=>{this.running=null;}); return this.running; }
   busy() { return !!this.running; }
-  snapshot() { return this.store.snapshot(this.config.machine,Date.now(),Math.max(240_000,this.config.intervalMs*4)); }
+  snapshot() { return this.store.snapshot(this.config.machine,Date.now(),this.leaseMs()); }
   private async collect() {
-    const settings = this.store.settings(), now = Date.now();
+    const settings = this.store.settings(), now = Date.now(), cadence = settings.scanMinutes * 60_000;
     const seen = new Set<string>();
     const taskSamples: Sample[] = [];
-    const observe = (s: Sample) => { seen.add(s.id); this.store.observe({ staleAfterMs: this.config.intervalMs*3+60_000, ...s }); };
+    const observe = (s: Sample) => { seen.add(s.id); this.store.observe({ staleAfterMs: cadence*3+60_000, ...s }); };
     const get = (path: string) => readJson(this.config.api + path, 8000, this.fetcher);
     const source = async (name: string, work: ()=>Promise<void>) => {
       try { await work(); observe({ id:`source:${name}`, name:`Space ${name}`, app:"space",kind:"space",coverage:"availability",verdict:"pass",code:"source_ok",detail:"Source responded with valid data" }); }
@@ -33,7 +42,7 @@ export class Engine {
         const d = await get("/api/tasks"); if (!Array.isArray(d.tasks)) throw new Error("Invalid tasks response");
         const tasks = (d.tasks as Task[]).filter(t=>t.enabled && !t.orphaned);
         await pool(tasks, 4, async t => {
-          let s = taskSample(t,settings,now);
+          let s = taskSample(t,settings,now,this.store.get<TaskPolicy>("taskPolicy",t.id) ?? {});
           if (t.state.lastStatus === "skipped") {
             try { const r = await get(`/api/tasks/${encodeURIComponent(t.id)}/runs?limit=3`); if (Array.isArray(r.runs) && r.runs.length === 3 && r.runs.every((v:{status:string})=>v.status === "skipped")) s = { ...s,verdict:"fail",code:"task_repeated_skip",detail:"Three consecutive executions were skipped" }; } catch { /* Keep the unknown result when history is unavailable. */ }
           }
@@ -66,18 +75,19 @@ export class Engine {
         if (!rule.enabled || control?.enabled === false) return;
         const last = this.store.get<Check>("check",rule.id);
         if (last && now-Date.parse(last.observedAt)<rule.intervalMs && last.status !== "unknown") return;
-        observe(await httpProbe(rule,this.fetcher));
+        // A rule shorter than the scan cadence runs once per scan, so it expires on the cadence.
+        observe({ ...await httpProbe(rule,this.fetcher), staleAfterMs: Math.max(rule.intervalMs,cadence)*3+rule.timeoutMs });
       })
     ]);
     for (const sample of taskSamples) observe(withRecoveryEvidence(sample, this.store.rules(), this.store.list<Check>("check"), now));
     for (const check of this.store.list<Check>("check")) {
       if (seen.has(check.id) || check.status === "paused") continue;
-      observe({...check,verdict:"unknown",code:"not_observed",detail:"Resource is absent, disabled, or its discovery source is unavailable"});
+      observe({...check,verdict:"unknown",transient:false,code:"not_observed",detail:"Resource is absent, disabled, or its discovery source is unavailable"});
     }
     this.store.finishScan(); this.store.prune(this.config.retentionDays);
     await this.deliver();
   }
-  peers(now=Date.now()): PeerView[] { return this.store.list<PeerView>("peer").map(p=>p.receivedAt && now-Date.parse(p.receivedAt)<=Math.max(240_000,this.config.intervalMs*4) ? p : {...p,status:"unknown",error:"Peer snapshot expired"}); }
+  peers(now=Date.now()): PeerView[] { return this.store.list<PeerView>("peer").map(p=>p.receivedAt && now-Date.parse(p.receivedAt)<=this.leaseMs() ? p : {...p,status:"unknown",error:"Peer snapshot expired"}); }
   async deliver() {
     if (!this.store.settings().notifications || !this.config.appToken) return;
     const rows = this.store.db.query("SELECT * FROM outbox WHERE next_at<=? AND attempts<10 ORDER BY next_at LIMIT 5").all(Date.now()) as {id:string;body:string;attempts:number}[];

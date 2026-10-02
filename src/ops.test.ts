@@ -26,7 +26,7 @@ describe("Incident lifecycle",()=>{
     } finally {rmSync(dir,{recursive:true,force:true});}
   });
   test("debounces failures, deduplicates incidents, requires consecutive recovery",()=>{
-    const s=store();expect(s.observe(sample,at).status).toBe("pending");
+    const s=store();expect(s.observe(sample,at).status).toBe("transient");
     s.observe(sample,at+1000);expect(s.observe(sample,at+2000).status).toBe("failing");
     s.observe(sample,at+3000);expect(s.list("incident")).toHaveLength(1);
     const incident=s.activeIncident("one")!;s.acknowledge(incident.id,at+4000);
@@ -116,7 +116,7 @@ describe("Task semantics",()=>{
   });
 });
 describe("Collector and API",()=>{
-  function engine(s:Store,f=mockFetch(url=>url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[]})){return new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",intervalMs:60000,retentionDays:30},f);}
+  function engine(s:Store,f=mockFetch(url=>url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[]})){return new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},f);}
   test("source loss changes discovered checks to unknown",async()=>{
     const s=store();let online=true;
     const e=engine(s,mockFetch(url=>{if(!online)throw new Error("offline");return url.endsWith("services")?{services:[{app:"app",title:"App",status:"active",health:"ok"}]}:url.endsWith("tasks")?{tasks:[]}:{peers:[]};}));
@@ -145,7 +145,7 @@ type CheckLike={status:string};
 
 test("recovery requires newer, fresh, enabled and verified evidence and keeps incident history", async () => {
   const s=store();
-  const rule=validateRule({name:"Completion",url:"http://example.test/status",recoveryTaskId:"task-1",evidenceTimestampPath:"$.finishedAt",assertions:[{path:"$.ok",operator:"eq",value:true}]});
+  const rule=validateRule({name:"Completion",url:"http://example.test/status",intervalMs:60000,recoveryTaskId:"task-1",evidenceTimestampPath:"$.finishedAt",assertions:[{path:"$.ok",operator:"eq",value:true}]});
   const failed:Sample={...sample,id:"task:task-1",kind:"task",code:"task_errors",evidenceAt:new Date(at-60000).toISOString(),failAfter:1};
   s.observe(failed,at);
   const evidence=await httpProbe(rule,mockFetch(()=>({ok:true,finishedAt:new Date(at-1000).toISOString()})),at);
@@ -189,4 +189,121 @@ test("successful execution with partial failures still opens a separate quality 
 test("recovery evidence must postdate the failed attempt end",()=>{
   const result=taskSample({id:"task-1",app:"test",name:"sync",enabled:true,orphaned:false,timeoutMs:60000,state:{lastStatus:"error",lastRunAt:"2026-10-01T09:00:00Z",lastDurationMs:300000,consecutiveErrors:3}},DEFAULT_SETTINGS,at);
   expect(result.evidenceAt).toBe("2026-10-01T09:05:00.000Z");
+});
+
+describe("One-off errors",()=>{
+  const task:Task={id:"t",app:"app",name:"job",enabled:true,orphaned:false,timeoutMs:60000,state:{lastStatus:"error",lastRunAt:"2026-10-01T09:00:00Z",lastDurationMs:1000,consecutiveErrors:1}};
+  test("a failed run below the threshold is a one-off error, never healthy and never an incident",()=>{
+    const s=store(),one=taskSample(task,DEFAULT_SETTINGS,at);
+    expect(one.transient).toBe(true);
+    for(let i=0;i<5;i++)expect(s.observe(one,at+i).status).toBe("transient");
+    expect(s.activeIncident("task:t")).toBeUndefined();
+    expect(s.get<{failedAt:string}>("check","task:t")?.failedAt).toBe("2026-10-01T09:00:01.000Z");
+    const ok=taskSample({...task,state:{lastStatus:"ok",lastRunAt:"2026-10-01T09:30:00Z"}},DEFAULT_SETTINGS,at);
+    const cleared=s.observe(ok,at+10);
+    expect(cleared.status).toBe("healthy");expect(cleared.failedAt).toBe("2026-10-01T09:00:01.000Z");
+    expect(taskSample({...task,state:{...task.state,consecutiveErrors:3}},DEFAULT_SETTINGS,at).verdict).toBe("fail");
+    expect(taskSample({...task,state:{lastStatus:"skipped",lastRunAt:"2026-10-01T09:00:00Z"}},DEFAULT_SETTINGS,at).transient).toBe(true);
+  });
+  test("an open incident keeps a later one-off observation unknown",()=>{
+    const s=store();s.observe({...sample,id:"task:t",failAfter:1},at);
+    expect(s.observe(taskSample(task,DEFAULT_SETTINGS,at),at+1).status).toBe("unknown");
+    expect(s.activeIncident("task:t")).toBeDefined();
+  });
+  test("absent resources lose their one-off state",async()=>{
+    const s=store();s.observe({...taskSample(task,DEFAULT_SETTINGS,at),id:"task:gone"},at);
+    await new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(url=>url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[]})).scan();
+    expect(s.get<CheckLike>("check","task:gone")?.status).toBe("unknown");
+  });
+  test("re-reading the same failed result counts once; a new failed result counts again",async()=>{
+    const s=store(),rule=validateRule({name:"Sync",url:"http://example.test",failAfter:2,evidenceTimestampPath:"$.latest.finishedAt",assertions:[{path:"$.latest.failed",operator:"eq",value:0}]});
+    const read=(finishedAt:string,failed:number)=>httpProbe(rule,mockFetch(()=>({latest:{finishedAt,failed}})),at);
+    const first=await read("2026-10-01T09:00:00Z",3);
+    for(let i=0;i<10;i++)expect(s.observe(first,at+i).status).toBe("transient");
+    expect(s.get<{failures:number}>("check",rule.id)?.failures).toBe(1);
+    expect(s.observe(await read("2026-10-01T09:30:00Z",3),at+20).status).toBe("failing");
+    expect(s.activeIncident(rule.id)).toBeDefined();
+  });
+  test("result timestamp may be set without recovery mapping, recovery still needs it",()=>{
+    expect(validateRule({name:"Sync",url:"http://example.test",evidenceTimestampPath:"$.latest.finishedAt"}).evidenceTimestampPath).toBe("$.latest.finishedAt");
+    expect(()=>validateRule({name:"Sync",url:"http://example.test",evidenceTimestampPath:"latest"})).toThrow();
+    expect(()=>validateRule({name:"Sync",url:"http://example.test",recoveryTaskId:"task-1",assertions:[{path:"$.ok",operator:"exists"}]})).toThrow();
+    expect(validateRule({name:"Sync",url:"http://example.test"}).intervalMs).toBe(300_000);
+  });
+  test("scan history counts one-off errors apart from failures",()=>{
+    const s=store();s.observe(sample,at);s.finishScan(at);
+    expect(s.snapshot("local",at).history[0]).toMatchObject({failing:0,transient:1});
+  });
+});
+
+describe("Scan cadence",()=>{
+  test("defaults to five minutes, is validated and stretches the expiry lease",async()=>{
+    const s=store(),e=new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30}),handler=api(e);
+    expect(e.intervalMs()).toBe(300_000);expect(e.leaseMs()).toBe(1_200_000);
+    const put=(body:unknown)=>handler(new Request("http://ops.test/api/settings",{method:"PUT",headers:{"content-type":"application/json",origin:"http://ops.test"},body:JSON.stringify(body)}));
+    expect((await put({scanMinutes:0})).status).toBe(400);
+    expect((await put({scanMinutes:61})).status).toBe(400);
+    expect((await put({scanMinutes:15})).status).toBe(200);
+    expect(e.intervalMs()).toBe(900_000);expect(e.snapshot().staleAfterMs).toBe(3_600_000);
+    const dash=await (await handler(new Request("http://ops.test/api/dashboard"))).json() as {scan:{intervalMs:number}};
+    expect(dash.scan.intervalMs).toBe(900_000);
+  });
+  test("a short rule interval expires on the scan cadence",async()=>{
+    const s=store();s.put("rule","r",validateRule({name:"API",url:"http://example.test/ok",intervalMs:60_000},"r"));
+    await new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(url=>url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:url.endsWith("peers")?{peers:[]}:{ok:true})).scan();
+    expect(s.get<{staleAfterMs:number}>("check","r")?.staleAfterMs).toBe(300_000*3+5000);
+  });
+});
+
+describe("Daily deadlines",()=>{
+  const a=[{path:"$.latestPublishedAt",operator:"dailyBy" as const,value:"15:00"}],zone="Asia/Shanghai";
+  // 2026-10-02 14:59 and 15:01 in Shanghai.
+  const before=Date.parse("2026-10-02T06:59:00Z"),after=Date.parse("2026-10-02T07:01:00Z");
+  test("requires today's date once the local deadline has passed, yesterday's before",()=>{
+    const yesterday={latestPublishedAt:"2026-10-01T05:02:51Z"},today={latestPublishedAt:"2026-10-01T16:30:00Z"};
+    expect(assertionsResult(yesterday,a,before,zone).verdict).toBe("pass");
+    expect(assertionsResult(yesterday,a,after,zone)).toMatchObject({verdict:"fail",code:"daily_deadline_missed"});
+    expect(assertionsResult(today,a,after,zone).verdict).toBe("pass");
+    expect(assertionsResult({latestPublishedAt:"2026-09-30T10:00:00Z"},a,before,zone).verdict).toBe("fail");
+    expect(assertionsResult({latestPublishedAt:null},a,after,zone).verdict).toBe("unknown");
+    expect(assertionsResult({latestPublishedAt:"2026-10-02 05:00:00"},a,after,zone).verdict).toBe("unknown");
+  });
+  test("needs a valid time and an explicit IANA zone",()=>{
+    expect(()=>validateRule({name:"Daily",url:"http://example.test",assertions:a})).toThrow();
+    expect(()=>validateRule({name:"Daily",url:"http://example.test",timezone:"Mars/Base",assertions:a})).toThrow();
+    expect(()=>validateRule({name:"Daily",url:"http://example.test",timezone:zone,assertions:[{...a[0],value:"25:00"}]})).toThrow();
+    expect(validateRule({name:"Daily",url:"http://example.test",timezone:zone,assertions:a}).timezone).toBe(zone);
+  });
+  test("a probe evaluates the deadline in the rule's zone",async()=>{
+    const rule=validateRule({name:"Daily",url:"http://example.test",timezone:zone,failAfter:1,assertions:a});
+    expect((await httpProbe(rule,mockFetch(()=>({latestPublishedAt:"2026-10-01T05:02:51Z"})),after)).verdict).toBe("fail");
+    expect((await httpProbe({...rule,timezone:"America/New_York"},mockFetch(()=>({latestPublishedAt:"2026-10-01T05:02:51Z"})),after)).verdict).toBe("pass");
+  });
+});
+
+describe("Task policies",()=>{
+  const task:Task={id:"us",app:"picker",name:"daily-sync-us",enabled:true,orphaned:false,timeoutMs:3600000,state:{runningAt:"2026-10-01T08:55:00Z"}};
+  test("a run not successful within its deadline fails on the first observation",()=>{
+    const s=store(),late=taskSample(task,DEFAULT_SETTINGS,at,{deadlineMinutes:60});
+    expect(late).toMatchObject({verdict:"fail",code:"task_deadline",failAfter:1});
+    expect(s.observe(late,at).status).toBe("failing");expect(s.activeIncident("task:us")).toBeDefined();
+    expect(taskSample({...task,state:{runningAt:"2026-10-01T09:05:00Z"}},DEFAULT_SETTINGS,at,{deadlineMinutes:60}).code).toBe("task_running");
+    expect(taskSample({...task,timeoutMs:7200000},DEFAULT_SETTINGS,at).code).toBe("task_running");
+  });
+  test("an error threshold of one makes a single failed run a failure, not a one-off",()=>{
+    const failed={...task,state:{lastStatus:"error",lastRunAt:"2026-10-01T08:00:00Z",consecutiveErrors:1}};
+    expect(taskSample(failed,DEFAULT_SETTINGS,at).transient).toBe(true);
+    expect(taskSample(failed,DEFAULT_SETTINGS,at,{errorThreshold:1})).toMatchObject({verdict:"fail",failAfter:1});
+    expect(taskSample({...task,state:{lastStatus:"skipped",lastRunAt:"2026-10-01T08:00:00Z"}},DEFAULT_SETTINGS,at,{errorThreshold:1}).verdict).toBe("fail");
+  });
+  test("policies are validated, stored, listed and cleared through the API",async()=>{
+    const s=store(),handler=api(new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(()=>({services:[],tasks:[],peers:[]}))));
+    const put=(id:string,body:unknown)=>handler(new Request(`http://ops.test/api/task-policies/${id}`,{method:"PUT",headers:{"content-type":"application/json",origin:"http://ops.test"},body:JSON.stringify(body)}));
+    expect((await put("us",{deadlineMinutes:0})).status).toBe(400);
+    expect((await put("bad id",{deadlineMinutes:60})).status).toBe(400);
+    expect((await put("us",{deadlineMinutes:60,errorThreshold:1})).status).toBe(200);
+    const dash=await (await handler(new Request("http://ops.test/api/dashboard"))).json() as {taskPolicies:Record<string,unknown>};
+    expect(dash.taskPolicies.us).toEqual({deadlineMinutes:60,errorThreshold:1});
+    await put("us",{});expect(s.get("taskPolicy","us")).toBeNull();
+  });
 });

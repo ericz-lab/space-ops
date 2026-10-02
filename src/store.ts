@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { validInstant } from "./rules.ts";
 import { DEFAULT_SETTINGS, type Check, type Incident, type Sample, type Settings, type Snapshot, type Rule } from "./types.ts";
 
 export class Store {
@@ -11,6 +12,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS observations_check ON observations(check_id,at);
       CREATE TABLE IF NOT EXISTS scans (at INTEGER PRIMARY KEY, passing INTEGER, failing INTEGER, unknown INTEGER);
       CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, error TEXT);`);
+    if (!(this.db.query("PRAGMA table_info(scans)").all() as { name: string }[]).some(c => c.name === "transient")) this.db.exec("ALTER TABLE scans ADD COLUMN transient INTEGER NOT NULL DEFAULT 0");
   }
   get<T>(kind: string, id: string): T | null { const r = this.db.query("SELECT body FROM documents WHERE kind=? AND id=?").get(kind, id) as { body: string } | null; return r ? JSON.parse(r.body) as T : null; }
   list<T>(kind: string): T[] { return (this.db.query("SELECT body FROM documents WHERE kind=? ORDER BY id").all(kind) as { body: string }[]).map(r => JSON.parse(r.body) as T); }
@@ -22,13 +24,18 @@ export class Store {
     return this.db.transaction(() => {
       const settings = this.settings(), at = new Date(now).toISOString();
       const prev = this.get<Check>("check", sample.id);
-      const failures = sample.verdict === "fail" ? (prev?.failures ?? 0) + 1 : 0;
+      // A rule with a result timestamp reports one execution; reading the same failed result again is not another failure.
+      const repeat = sample.verdict === "fail" && sample.kind === "http" && !!sample.evidenceAt && prev?.verdict === "fail" && prev.evidenceAt === sample.evidenceAt;
+      const failures = sample.verdict === "fail" ? (prev?.failures ?? 0) + (repeat ? 0 : 1) : 0;
       const successes = sample.verdict === "pass" ? (prev?.successes ?? 0) + 1 : 0;
       const incident = this.activeIncident(sample.id);
-      let status: Check["status"] = sample.verdict === "unknown" ? "unknown" : sample.verdict === "fail" ? (incident || failures >= (sample.failAfter ?? settings.failAfter) ? "failing" : "pending") : (incident && successes < (sample.recoverAfter ?? settings.recoverAfter) ? "recovering" : "healthy");
+      let status: Check["status"] = sample.verdict === "unknown" ? (sample.transient && !incident ? "transient" : "unknown") : sample.verdict === "fail" ? (incident || failures >= (sample.failAfter ?? settings.failAfter) ? "failing" : "transient") : (incident && successes < (sample.recoverAfter ?? settings.recoverAfter) ? "recovering" : "healthy");
       const control = this.get<{ enabled?: boolean; mutedUntil?: string | null }>("control", sample.id);
       if (control?.enabled === false) status = "paused";
-      const check: Check = { ...sample, status, failures, successes, observedAt: at, lastPassedAt: sample.verdict === "pass" ? at : prev?.lastPassedAt ?? null, mutedUntil: control?.mutedUntil ?? null, enabled: control?.enabled !== false };
+      // When the current failure episode began; a task reports the end of its failed execution instead.
+      const failed = sample.verdict === "fail" || status === "transient", wasFailed = prev?.verdict === "fail" || prev?.status === "transient";
+      const failedAt = !failed ? prev?.failedAt ?? null : sample.kind === "task" && validInstant(sample.evidenceAt) ? sample.evidenceAt : wasFailed && prev?.failedAt ? prev.failedAt : at;
+      const check: Check = { ...sample, status, failures, successes, observedAt: at, lastPassedAt: sample.verdict === "pass" ? at : prev?.lastPassedAt ?? null, failedAt, mutedUntil: control?.mutedUntil ?? null, enabled: control?.enabled !== false };
       this.put("check", sample.id, check);
       this.db.query("INSERT INTO observations(check_id,at,verdict,code,latency) VALUES(?,?,?,?,?)").run(sample.id, now, sample.verdict, sample.code, sample.latencyMs ?? null);
       if (status === "failing" && !incident) {
@@ -67,12 +74,12 @@ export class Store {
   finishScan(now = Date.now()) {
     this.put("meta", "scan", now);
     const cs = this.list<Check>("check");
-    this.db.query("INSERT OR REPLACE INTO scans VALUES(?,?,?,?)").run(now, cs.filter(c=>c.status === "healthy").length, cs.filter(c=>["failing","pending","recovering"].includes(c.status)).length, cs.filter(c=>c.status === "unknown").length);
+    this.db.query("INSERT OR REPLACE INTO scans(at,passing,failing,unknown,transient) VALUES(?,?,?,?,?)").run(now, cs.filter(c=>c.status === "healthy").length, cs.filter(c=>["failing","recovering"].includes(c.status)).length, cs.filter(c=>c.status === "unknown").length, cs.filter(c=>c.status === "transient").length);
   }
   snapshot(machine: string, now = Date.now(), staleAfterMs = 240_000): Snapshot {
     const last = this.get<number>("meta", "scan");
     const checks = this.list<Check>("check").map(c => c.status !== "paused" && now - Date.parse(c.observedAt) > (c.staleAfterMs ?? 180_000) ? { ...c, status: "unknown" as const, code: "stale_observation", detail: "Observation expired; awaiting a fresh probe" } : c);
-    const history = (this.db.query("SELECT * FROM scans ORDER BY at DESC LIMIT 48").all() as { at: number; passing: number; failing: number; unknown: number }[]).reverse().map(r => ({ ...r, at: new Date(r.at).toISOString() }));
+    const history = (this.db.query("SELECT * FROM scans ORDER BY at DESC LIMIT 48").all() as { at: number; passing: number; failing: number; unknown: number; transient: number }[]).reverse().map(r => ({ ...r, at: new Date(r.at).toISOString() }));
     const all=this.list<Incident>("incident").sort((a,b)=>b.openedAt.localeCompare(a.openedAt));
     const incidents=[...all.filter(i=>i.status!=="resolved"),...all.filter(i=>i.status==="resolved").slice(0,100)];
     return { version: 1, machine, generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history };

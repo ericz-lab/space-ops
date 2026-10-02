@@ -1,7 +1,7 @@
 import { freemem, totalmem, loadavg, cpus } from "node:os";
 import { statfs, readFile } from "node:fs/promises";
 import { assertionsResult, field, validInstant } from "./rules.ts";
-import type { Rule, Sample, Settings, Check } from "./types.ts";
+import type { Rule, Sample, Settings, Check, TaskPolicy } from "./types.ts";
 
 export async function readJson(url: string, timeoutMs = 8000, fetcher: typeof fetch = fetch): Promise<any> {
   const r = await fetcher(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
@@ -28,25 +28,29 @@ export async function httpProbe(rule: Rule, fetcher: typeof fetch = fetch, now =
     let evidenceAt: string | undefined;
     if (rule.evidenceTimestampPath) {
       const value = field(data, rule.evidenceTimestampPath);
-      if (!validInstant(value) || Date.parse(value) > now + 60_000) return { ...base, verdict: "unknown", code: "invalid_recovery_timestamp", detail: "Recovery completion timestamp is absent, invalid or in the future" };
+      if (!validInstant(value) || Date.parse(value) > now + 60_000) return { ...base, verdict: "unknown", code: "invalid_recovery_timestamp", detail: "Result timestamp is absent, invalid or in the future" };
       evidenceAt = new Date(value).toISOString();
     }
-    return { ...base, evidenceAt, ...assertionsResult(data, rule.assertions, now), latencyMs: Math.round(performance.now()-started) };
+    return { ...base, evidenceAt, ...assertionsResult(data, rule.assertions, now, rule.timezone), latencyMs: Math.round(performance.now()-started) };
   } catch (e) { return { ...base, verdict: "fail", code: "http_unreachable", detail: e instanceof Error && e.name === "TimeoutError" ? "Probe exceeded its timeout" : "Connection failed, redirected, or timed out", latencyMs: Math.round(performance.now()-started) }; }
 }
 export type Task = { id: string; app: string; name: string; enabled: boolean; orphaned: boolean; timeoutMs: number; state: { runningAt?: string; nextRunAt?: string; lastRunAt?: string; lastDurationMs?: number; lastStatus?: string; consecutiveErrors?: number; pending?: { dueAt: string; deadlineAt?: string } } };
-export function taskSample(t: Task, settings: Settings, now = Date.now()): Sample {
-  const s = t.state;
+export function taskSample(t: Task, settings: Settings, now = Date.now(), policy: TaskPolicy = {}): Sample {
+  const s = t.state, errorThreshold = policy.errorThreshold ?? settings.taskErrorThreshold, deadlineMs = (policy.deadlineMinutes ?? 0) * 60_000;
   const base: Sample = { id: `task:${t.id}`, name: `${t.app} / ${t.name}`, app: t.app, kind: "task", verdict: "pass", code: "task_ok", detail: "Execution status only; business output is not verified", coverage: "execution", evidenceAt: s.lastRunAt };
   // A late completion must also postdate the failed attempt's end, not only its start.
   if (["error", "skipped"].includes(s.lastStatus ?? "") && validInstant(s.lastRunAt) && Number.isFinite(s.lastDurationMs) && s.lastDurationMs! >= 0) base.evidenceAt = new Date(Date.parse(s.lastRunAt) + s.lastDurationMs!).toISOString();
   if (!t.enabled || t.orphaned) return { ...base, verdict: "unknown", code: "task_disabled", detail: "Task is disabled or no longer declared" };
+  // An operator deadline is a fact about this run, not a flaky probe: it opens on the first observation.
+  if (s.runningAt && deadlineMs && now - Date.parse(s.runningAt) > deadlineMs) return { ...base, verdict: "fail", failAfter: 1, code: "task_deadline", detail: `Not successful within ${policy.deadlineMinutes} minutes of its start`, value: now-Date.parse(s.runningAt), threshold: deadlineMs, evidenceAt: s.runningAt };
   if (s.runningAt && now - Date.parse(s.runningAt) > t.timeoutMs + 60_000) return { ...base, verdict: "fail", code: "task_stalled", detail: "Running beyond the configured timeout and 60s grace", value: now-Date.parse(s.runningAt), threshold: t.timeoutMs + 60_000 };
   if (s.runningAt) return { ...base, verdict: "unknown", code: "task_running", detail: "Task is running within its deadline" };
   if (s.nextRunAt && now - Date.parse(s.nextRunAt) > 180_000) return { ...base, verdict: "fail", code: "task_overdue", detail: "Scheduled execution is overdue by more than 3 minutes", evidenceAt: s.nextRunAt };
   if (s.pending?.dueAt && now - Date.parse(s.pending.dueAt) > 180_000) return { ...base, verdict: "fail", code: "event_overdue", detail: "Pending event execution is overdue by more than 3 minutes", evidenceAt: s.pending.dueAt };
-  if (s.lastStatus === "error") return { ...base, verdict: (s.consecutiveErrors ?? 1) >= settings.taskErrorThreshold ? "fail" : "unknown", code: "task_errors", detail: `${s.consecutiveErrors ?? 1} failed executions; latest failure may predate a repair`, value: s.consecutiveErrors ?? 1, threshold: settings.taskErrorThreshold };
-  if (s.lastStatus === "skipped") return { ...base, verdict: "unknown", code: "task_skipped", detail: "Latest execution was skipped; completion is not established" };
+  // Below the threshold the failure is a one-off error: not healthy, not an incident, cleared by the next good run.
+  if (s.lastStatus === "error") { const n = s.consecutiveErrors ?? 1; return n >= errorThreshold ? { ...base, verdict: "fail", ...(policy.errorThreshold ? { failAfter: 1 } : {}), code: "task_errors", detail: `${n} consecutive failed execution${n === 1 ? "" : "s"}; latest failure may predate a repair`, value: n, threshold: errorThreshold } : { ...base, verdict: "unknown", transient: true, code: "task_errors", detail: `${n} failed execution${n === 1 ? "" : "s"}, below the threshold of ${errorThreshold}; cleared by the next successful run`, value: n, threshold: errorThreshold }; }
+  if (s.lastStatus === "skipped" && policy.errorThreshold === 1) return { ...base, verdict: "fail", failAfter: 1, code: "task_skipped", detail: "Latest execution was skipped" };
+  if (s.lastStatus === "skipped") return { ...base, verdict: "unknown", transient: true, code: "task_skipped", detail: "Latest execution was skipped; cleared by the next completed run" };
   if (!s.lastRunAt) return { ...base, verdict: "unknown", code: "task_never_run", detail: "No completed execution has been observed" };
   return base;
 }
@@ -71,7 +75,7 @@ export function withRecoveryEvidence(sample: Sample, rules: Rule[], checks: Chec
     const check = checks.find(c => c.id === rule.id);
     if (!check || !check.enabled || check.status !== "healthy" || check.verdict !== "pass" || !validInstant(check.evidenceAt)) continue;
     if (now - Date.parse(check.observedAt) > (check.staleAfterMs ?? 180_000) || Date.parse(check.evidenceAt) > now + 60_000 || Date.parse(check.evidenceAt) <= Date.parse(sample.evidenceAt)) continue;
-    return { ...sample, verdict: "pass", code: "task_recovered_evidence", value: undefined, threshold: undefined, coverage: "assertion", evidenceAt: check.evidenceAt, detail: `Recovered: ${rule.name}; completion ${check.evidenceAt} is newer than failed execution ${sample.evidenceAt}` };
+    return { ...sample, verdict: "pass", transient: undefined, code: "task_recovered_evidence", value: undefined, threshold: undefined, coverage: "assertion", evidenceAt: check.evidenceAt, detail: `Recovered: ${rule.name}; completion ${check.evidenceAt} is newer than failed execution ${sample.evidenceAt}` };
   }
   return sample;
 }

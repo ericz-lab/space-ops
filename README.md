@@ -16,14 +16,22 @@ Space provisions the SQLite database, service environment and panel widget throu
 ## Checks
 
 - **Automatic discovery:** local active services, enabled tasks, source reachability, peer collectors, memory/load and disk at the data directory.
-- **Task policies:** configured runtime plus 60 seconds grace; next scheduled or pending-event execution more than three minutes overdue; configurable consecutive failures; three consecutive skipped runs. Historical failures retain their original source timestamp. An isolated failure is unknown until subsequent execution clarifies it.
+- **Task policies:** configured runtime plus 60 seconds grace; next scheduled or pending-event execution more than three minutes overdue; configurable consecutive failures; three consecutive skipped runs. Historical failures retain their original source timestamp. A failure below the threshold is a one-off error (see below).
+- **Per-task policy:** a task's detail sheet sets a success deadline ("must succeed within N minutes of its start") and its own failed-run threshold (`PUT /api/task-policies/:taskId`). A missed deadline, or a reached threshold of this policy, opens an incident on the first observation. Policies are local to the collector.
 - **HTTP:** explicit expected status, GET-only, configurable timeout and interval, no redirects, at most 2 MB for JSON assertions. Targets may be loopback/private addresses, so protect the UI with operator-only access. Do not put credentials in URLs.
-- **Assertions:** paths such as `$.output.verified` or `$.items[0].count`; operators `exists`, `eq`, `lt`, `gt`, `ageLessThan`. Age thresholds are milliseconds; timestamps require an explicit zone. Missing data and invalid types produce unknown, except an explicit existence assertion fails.
+- **Assertions:** paths such as `$.output.verified` or `$.items[0].count`; operators `exists`, `eq`, `lt`, `gt`, `ageLessThan`, `dailyBy`. Age thresholds are milliseconds; timestamps require an explicit zone. `dailyBy` takes a local time (`"15:00"`) and needs the rule's IANA `timezone`: once that time has passed, the timestamp must fall on today's local date; before it, on yesterday's.
+- **Result timestamp:** `evidenceTimestampPath` (for example `$.latest.finishedAt`) marks each distinct value as one execution. Re-reading the same failed result does not count as another failure, so one failed run stays a one-off error until another run fails. Missing data and invalid types produce unknown, except an explicit existence assertion fails.
 - **Coverage:** service reachability and task execution do not verify business output. Add data assertions against the app's existing JSON API to verify freshness, counts or completion. This release does not infer business calendars, content correctness or causal dependencies.
+
+### One-off errors
+
+A failure below its incident threshold is a **one-off error** (`transient`): a single failed or skipped task run, or a probe failing fewer than `failAfter` times. It is never healthy, never an incident and never notified; the overview lists it apart from what needs attention, together with checks that failed in the last 24 hours and pass again ("cleared"). A repeat failure that reaches the threshold opens an incident. A running task within its deadline shows as running, not as missing evidence.
+
+### Incidents
 
 Each rule has opening/recovery thresholds. Incidents are persisted separately from observations. Unknown does not resolve an incident; acknowledgement, notification mute and pause also leave it open. Consecutive passing observations close it with evidence. Paused custom probes do not run. Automatic checks can be paused without changing the underlying service or task.
 
-The collector runs independently of Space tasks. It polls every 60 seconds by default, never overlaps its own scans, caps probe concurrency and preserves its state across restarts. Expired observations become unknown on read, including when the collector itself stops. Custom intervals are minimum intervals; actual start includes collector cadence and scan duration.
+The collector runs independently of Space tasks. It scans every 5 minutes by default; Settings changes the interval (1–60 minutes) without a restart. It never overlaps its own scans, caps probe concurrency and preserves its state across restarts. Expired observations become unknown on read, including when the collector itself stops. Custom intervals are minimum intervals; actual start includes collector cadence and scan duration.
 
 ## Peers
 
@@ -51,7 +59,8 @@ SQLite in `DATABASE_URL`, otherwise `${SPACE_APP_DATA_DIR}/main.db`, otherwise l
 | POST / PUT | `/api/rules` / `/api/rules/:id` | Create / update a validated custom rule |
 | PATCH | `/api/checks/:id` | `{enabled}` or `{muteMinutes}` |
 | POST | `/api/incidents/:id` | Acknowledge an incident |
-| PUT | `/api/settings` | Local detection/notification settings |
+| PUT | `/api/settings` | Local scan interval, detection and notification settings |
+| PUT | `/api/task-policies/:taskId` | `{deadlineMinutes, errorThreshold}`; empty clears |
 | GET | `/api/widget` | Space panel summary |
 
 Mutation endpoints require JSON and an HTTP(S) Origin matching the request host and port (TLS terminates at Space ingress); cross-site browser requests are rejected. This is CSRF protection, not identity authentication. Loopback and the configured private access layer establish identity. Peer snapshot reads must travel through the authenticated Space peer connection or a private tunnel.
