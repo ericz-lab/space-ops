@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { validInstant } from "./rules.ts";
-import { DEFAULT_SETTINGS, type Check, type Incident, type IncidentEvent, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
+import { DEFAULT_SETTINGS, type Check, type Incident, type Inspection, type IncidentEvent, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
 
 export class Store {
   readonly db: Database;
@@ -127,7 +127,19 @@ export class Store {
     const history = (this.db.query("SELECT * FROM scans ORDER BY at DESC LIMIT 48").all() as { at: number; passing: number; failing: number; unknown: number; transient: number }[]).reverse().map(r => ({ ...r, at: new Date(r.at).toISOString() }));
     const all=this.list<Incident>("incident").sort((a,b)=>b.openedAt.localeCompare(a.openedAt));
     const incidents=[...all.filter(i=>i.status!=="resolved"),...all.filter(i=>i.status==="resolved").slice(0,100)];
-    return { version: 1, machine, generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history };
+    // A reading older than the scan lease is no longer today's answer.
+    const inspections = this.list<Inspection>("inspection").map(i => now - Date.parse(i.observedAt) > staleAfterMs ? { ...i, state: "unknown" as const, detail: "Reading expired; awaiting a fresh scan" } : i);
+    return { version: 1, machine, generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections };
+  }
+  /** One inspection reading; `doneAt` remembers the last reading that was done. */
+  putInspection(reading: Omit<Inspection, "doneAt">) {
+    const prev = this.get<Inspection>("inspection", reading.id);
+    this.put("inspection", reading.id, { ...reading, doneAt: reading.state === "done" ? reading.observedAt : prev?.doneAt ?? null } satisfies Inspection);
+  }
+  /** Forget checks no app declares any more. */
+  retainInspections(ids: string[]) {
+    const keep = new Set(ids);
+    for (const i of this.list<Inspection>("inspection")) if (!keep.has(i.id)) this.db.query("DELETE FROM documents WHERE kind='inspection' AND id=?").run(i.id);
   }
   history(id: string) { return (this.db.query("SELECT at,verdict,code,latency FROM observations WHERE check_id=? ORDER BY at DESC LIMIT 60").all(id) as { at: number }[]).map(r=>({ ...r, at: new Date(r.at).toISOString() })); }
   prune(days: number, now = Date.now()) { const before = now - days * 86_400_000; this.db.query("DELETE FROM observations WHERE at<?").run(before); this.db.query("DELETE FROM scans WHERE at<?").run(before); }

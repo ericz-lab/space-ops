@@ -261,3 +261,6 @@ dialog[open]{animation:sheet-in .28s cubic-bezier(.2,.9,.3,1)}
 .timeline li.record p{color:var(--label);background:var(--fill-2);border-radius:8px;padding:8px 10px;white-space:pre-wrap}
 .card.empty.small{padding:18px}
 .row[disabled]{cursor:default;opacity:.85}
+
+.source-item .count.soft{color:var(--orange)}
+.tab-badge.soft{background:var(--orange)}

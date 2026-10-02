@@ -1,4 +1,5 @@
 import { Store } from "./store.ts";
+import { declared, inspect } from "./inspections.ts";
 import { declaredNoop, hostSamples, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import type { Check, PeerView, Sample, Snapshot, TaskPolicy } from "./types.ts";
 
@@ -69,6 +70,12 @@ export class Engine {
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",code:"peer_unavailable",detail:"Peer collector is unavailable or its snapshot expired"});
           }
         });
+      }),
+      // Apps' declared checks (点检): read for the inspection page, never observed as faults.
+      source("checks", async () => {
+        const list = declared(await get("/api/checks"));
+        await pool(list, 4, async c => this.store.putInspection(await inspect(c, this.fetcher, now)));
+        this.store.retainInspections(list.map(c => c.id));
       }),
       hostSamples(this.config.dataDir,settings).then(samples=>samples.forEach(observe)),
       pool(this.store.rules(),4,async rule=>{

@@ -7,7 +7,8 @@ import { assertionsResult, field, validateRule } from "./rules.ts";
 import { declaredNoop, httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
-import { DEFAULT_SETTINGS, type Sample } from "./types.ts";
+import { DEFAULT_SETTINGS, type DeclaredCheck, type Sample } from "./types.ts";
+import { declared, evaluate, inspect } from "./inspections.ts";
 
 const stores:Store[]=[];
 afterEach(()=>{for(const s of stores.splice(0))s.db.close();});
@@ -388,5 +389,49 @@ describe("Operator incidents",()=>{
     expect((await post("/api/incidents",{name:"Disk swap",detail:"Planned",severity:"fatal"})).status).toBe(400);
     const made=await post("/api/incidents",{checkId:"one",detail:"Escalated"});expect(made.status).toBe(201);
     expect((await post("/api/incidents/nope/notes",{text:"x"})).status).toBe(400);
+  });
+});
+
+describe("Inspections (点检)",()=>{
+  // 2026-10-02 10:00 Hong Kong
+  const now=Date.parse("2026-10-02T02:00:00Z");
+  const hk:DeclaredCheck={id:"picker/hk-today",app:"picker",appTitle:"Picker",name:"hk-today",url:"http://127.0.0.1:8975/api/sync-status?market=hk",when:[{path:"$.today.open",operator:"eq",value:true}],done:[{path:"$.today.done",operator:"eq",value:true}],due:"18:00",timezone:"Asia/Hong_Kong"};
+  test("not done before the deadline is pending, after it late; a closed day is off",()=>{
+    expect(evaluate(hk,{today:{open:true,done:true}},now).state).toBe("done");
+    expect(evaluate(hk,{today:{open:true,done:false}},now).state).toBe("pending");
+    expect(evaluate(hk,{today:{open:true,done:false}},now+9*3_600_000).state).toBe("late");
+    expect(evaluate(hk,{today:{open:false,done:false}},now).state).toBe("off");
+    expect(evaluate(hk,{today:{open:null,done:false}},now).state).toBe("unknown");
+    expect(evaluate({...hk,due:undefined},{today:{open:true,done:false}},now).state).toBe("late");
+  });
+  test("today compares the timestamp's local date in the check's timezone",()=>{
+    const c:DeclaredCheck={...hk,when:undefined,due:"15:00",timezone:"Asia/Shanghai",done:[{path:"$.latestPublishedAt",operator:"today"}]};
+    expect(evaluate(c,{latestPublishedAt:"2026-10-02T01:00:00Z"},now).state).toBe("done");
+    expect(evaluate(c,{latestPublishedAt:"2026-10-01T16:01:00Z"},now).state).toBe("done");
+    expect(evaluate(c,{latestPublishedAt:"2026-10-01T15:59:00Z"},now).state).toBe("pending");
+    expect(evaluate(c,{latestPublishedAt:"2026-10-01"},now).state).toBe("unknown");
+  });
+  test("a scan reads declared checks, never opens incidents and forgets undeclared ones",async()=>{
+    const s=store();let checks=[hk];
+    const fetcher=mockFetch(url=>url.endsWith("/api/checks")?{checks}:url.includes("8975")?{today:{open:true,done:false}}:url.endsWith("services")?{services:[]}:url.endsWith("/api/tasks")?{tasks:[]}:{peers:[]});
+    const engine=new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},fetcher);
+    await engine.scan();
+    const snap=engine.snapshot();
+    expect(snap.inspections?.map(i=>[i.id,i.state])).toEqual([["picker/hk-today",expect.stringMatching(/pending|late/)]]);
+    expect(snap.incidents).toHaveLength(0);
+    expect(snap.checks.some(c=>c.id==="picker/hk-today")).toBe(false);
+    expect(snap.checks.find(c=>c.id==="source:checks")?.verdict).toBe("pass");
+    checks=[];await engine.scan();
+    expect(engine.snapshot().inspections).toEqual([]);
+  });
+  test("remembers the last done reading and expires old readings",()=>{
+    const s=store(),base={id:"a/b",app:"a",appTitle:"A",name:"b",detail:"",observedAt:new Date(now).toISOString()};
+    s.putInspection({...base,state:"done"});s.putInspection({...base,state:"pending",observedAt:new Date(now+60_000).toISOString()});
+    expect(s.snapshot("m",now+120_000).inspections?.[0]).toMatchObject({state:"pending",doneAt:new Date(now).toISOString()});
+    expect(s.snapshot("m",now+3_600_000).inspections?.[0]?.state).toBe("unknown");
+  });
+  test("only reads this machine's loopback",async()=>{
+    expect((await inspect({...hk,url:"http://example.com/x"},mockFetch(()=>({})),now)).state).toBe("unknown");
+    expect(declared({checks:[hk,{id:1}]})).toEqual([hk]);
   });
 });

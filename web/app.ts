@@ -1,4 +1,4 @@
-import type { Check, Incident, PeerView, Rule, ScanRecord, Settings, Snapshot, Status, TaskPolicy } from "../src/types.ts";
+import type { Check, Incident, Inspection, PeerView, Rule, ScanRecord, Settings, Snapshot, Status, TaskPolicy } from "../src/types.ts";
 import { t, tn, lang, setLang, ago, until, date, type Key } from "./i18n.ts";
 
 const paths: Record<string,string> = {
@@ -6,6 +6,7 @@ const paths: Record<string,string> = {
   pulse:'<path d="M2 12h4.5l2.5-7 4.5 14 2.5-7H22"/>',bell:'<path d="M18 9a6 6 0 0 0-12 0c0 6.5-2.5 7.5-2.5 8.5h17c0-1-2.5-2-2.5-8.5M10 21h4"/>',
   gear:'<circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v2.6M12 18.9v2.6M4.4 4.4l1.9 1.9M17.7 17.7l1.9 1.9M2.5 12h2.6M18.9 12h2.6M4.4 19.6l1.9-1.9M17.7 6.3l1.9-1.9"/>',
   server:'<rect x="3" y="3.5" width="18" height="7" rx="2"/><rect x="3" y="13.5" width="18" height="7" rx="2"/><path d="M7 7h.01M7 17h.01"/>',
+  clipboard:'<rect x="5" y="4" width="14" height="17" rx="2.5"/><path d="M9 4V3h6v1M8.5 12l2.5 2.5 4.5-5"/>',moon:'<path d="M20 14.5A8.5 8.5 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5z"/>',
   plus:'<path d="M12 5v14M5 12h14"/>',chevron:'<path d="m9.5 6 6 6-6 6"/>',check:'<path d="m5 12.5 4.5 4.5L19 7"/>',refresh:'<path d="M20 5v5h-5M4 19v-5h5M19.4 10A8 8 0 0 0 5.3 7.3M4.6 14a8 8 0 0 0 14.1 2.7"/>',
   search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/>',close:'<path d="m7 7 10 10M7 17 17 7"/>',clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/>',
   shield:'<path d="M12 2.5 19.5 5.5v6c0 5-3.4 8.6-7.5 10-4.1-1.4-7.5-5-7.5-10v-6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',layers:'<path d="m12 3 9.5 5-9.5 5-9.5-5zM2.5 12.5l9.5 5 9.5-5M2.5 16.5l9.5 5 9.5-5"/>',
@@ -20,7 +21,7 @@ type Listed=Check&{machine:string;remote:boolean};
 type ListedIncident=Incident&{machine:string;remote:boolean};
 /** What a row shows: the stored status, plus a running task apart from missing evidence. */
 type Shown=Exclude<Status,"unknown">|"unknown"|"running";
-const PAGES=["overview","checks","incidents","settings"] as const;
+const PAGES=["overview","checks","inspections","incidents","settings"] as const;
 const SCAN_CHOICES=[1,2,5,10,15,30,60];
 const DAY=86_400_000;
 let data:Dashboard|null=null,page=(location.hash.slice(1)||"overview"),machine="all",filter="all",query="",offline=false;
@@ -29,7 +30,7 @@ let refreshPending=false;
 
 // A peer on an older release still reports a sub-threshold failure as "pending".
 function shown(c:Check):Shown{const s=c.status as string;return s==="pending"?"transient":s==="unknown"&&c.code==="task_running"?"running":s as Shown;}
-const tone:Record<string,string>={healthy:"green",resolved:"green",cleared:"green",transient:"orange",failing:"red",open:"red",recovering:"blue",acknowledged:"blue",running:"blue",unknown:"gray",paused:"gray"};
+const tone:Record<string,string>={done:"green",pending:"blue",late:"orange",off:"gray",healthy:"green",resolved:"green",cleared:"green",transient:"orange",failing:"red",open:"red",recovering:"blue",acknowledged:"blue",running:"blue",unknown:"gray",paused:"gray"};
 function badge(status:string,label=t(status as Key)??status){return `<span class="badge tone-${tone[status]??"gray"}"><i></i>${esc(label)}</span>`;}
 const kindIcon=(kind:string)=>({service:["server","blue"],task:["clock","indigo"],http:["globe","teal"],host:["cpu","gray"],peer:["layers","purple"],space:["grid","blue"]} as Record<string,[string,string]>)[kind]??["pulse","teal"];
 function sym(name:string,tint:string,cls=""){return `<span class="sym tint-${tint} ${cls}">${icon(name)}</span>`;}
@@ -49,14 +50,15 @@ function scanLine(){return `${t("lastScan")} ${ago(data?.local.lastScanAt)} · $
 function render(){
   if(!PAGES.includes(page as typeof PAGES[number]))page="overview";
   const active=incidents().filter(i=>i.status!=="resolved").length;
-  const nav=[["overview","grid","blue"],["checks","pulse","green"],["incidents","bell","red"],["settings","gear","gray"]] as const;
+  const nav=[["overview","grid","blue"],["checks","pulse","green"],["inspections","clipboard","teal"],["incidents","bell","red"],["settings","gear","gray"]] as const;
+  const late=inspections().filter(i=>i.state==="late").length;
   const machines=data?[{name:data.local.machine,ok:localFresh()},...data.peers.map(p=>({name:p.name,ok:p.status==="healthy"}))]:[];
   document.documentElement.lang=lang;
-  root.innerHTML=`<aside class="sidebar"><a class="brand" href="#overview"><img src="/icon.svg" alt=""><span>Space Ops</span></a><nav class="source-list"><p class="group-label">${t("workspace")}</p>${nav.map(([p,i,c])=>`<button class="source-item ${page===p?"selected":""}" data-page="${p}">${sym(i,c)}<span>${t(p)}</span>${p==="incidents"&&active?`<span class="count">${active}</span>`:""}</button>`).join("")}<p class="group-label">${t("machines")}</p><button class="source-item ${machine==="all"?"selected":""}" data-machine="all">${sym("layers","purple")}<span>${t("allMachines")}</span></button>${machines.map(m=>`<button class="source-item ${machine===m.name?"selected":""}" data-machine="${esc(m.name)}">${sym("server",m.ok?"green":"gray")}<span>${esc(m.name)}</span><i class="dot ${m.ok?"on":""}"></i></button>`).join("")}</nav><div class="sidebar-foot"><i class="dot ${localFresh()?"on":"off"}"></i><div><strong>${t(localFresh()?"live":"disconnected")}</strong><small>${data?esc(scanLine()):"—"}</small></div></div></aside>
+  root.innerHTML=`<aside class="sidebar"><a class="brand" href="#overview"><img src="/icon.svg" alt=""><span>Space Ops</span></a><nav class="source-list"><p class="group-label">${t("workspace")}</p>${nav.map(([p,i,c])=>`<button class="source-item ${page===p?"selected":""}" data-page="${p}">${sym(i,c)}<span>${t(p)}</span>${p==="incidents"&&active?`<span class="count">${active}</span>`:p==="inspections"&&late?`<span class="count soft">${late}</span>`:""}</button>`).join("")}<p class="group-label">${t("machines")}</p><button class="source-item ${machine==="all"?"selected":""}" data-machine="all">${sym("layers","purple")}<span>${t("allMachines")}</span></button>${machines.map(m=>`<button class="source-item ${machine===m.name?"selected":""}" data-machine="${esc(m.name)}">${sym("server",m.ok?"green":"gray")}<span>${esc(m.name)}</span><i class="dot ${m.ok?"on":""}"></i></button>`).join("")}</nav><div class="sidebar-foot"><i class="dot ${localFresh()?"on":"off"}"></i><div><strong>${t(localFresh()?"live":"disconnected")}</strong><small>${data?esc(scanLine()):"—"}</small></div></div></aside>
 <div class="content"><header class="toolbar"><div class="toolbar-title">${t(page as Key)}</div><div class="toolbar-actions">${machines.length>1?`<select class="machine-select" id="machine" aria-label="${t("machines")}"><option value="all">${t("allMachines")}</option>${machines.map(m=>`<option value="${esc(m.name)}" ${machine===m.name?"selected":""}>${esc(m.name)}</option>`).join("")}</select>`:""}<button class="tool-button" id="language" aria-label="${t("language")}">${lang==="zh"?"EN":"中"}</button><button class="tool-button" id="scan" ${data?.busy?"disabled":""} title="${t("scan")}" aria-label="${t("scan")}">${icon("refresh",data?.busy?"spin":"")}<span>${t(data?.busy?"scanning":"scan")}</span></button><button class="tool-button accent" id="new" title="${t("newCheck")}" aria-label="${t("newCheck")}">${icon("plus")}<span>${t("newCheck")}</span></button></div></header>
-<main><div class="large-title"><h1>${t(page as Key)}</h1><p>${t(page==="overview"?"subtitle":page==="checks"?"checksSub":page==="incidents"?"incidentsSub":"settingsSub")}</p></div>${offline?`<div class="banner" role="alert">${icon("warn")}${t("loadFailed")}</div>`:""}${!data?`<div class="card empty">${icon("clock")}<h3>${t("noData")}</h3></div>`:page==="overview"?overview():page==="checks"?checksPage():page==="incidents"?incidentPage():settingsPage()}</main>
+<main><div class="large-title"><h1>${t(page as Key)}</h1><p>${t(page==="overview"?"subtitle":page==="checks"?"checksSub":page==="inspections"?"inspectionsSub":page==="incidents"?"incidentsSub":"settingsSub")}</p></div>${offline?`<div class="banner" role="alert">${icon("warn")}${t("loadFailed")}</div>`:""}${!data?`<div class="card empty">${icon("clock")}<h3>${t("noData")}</h3></div>`:page==="overview"?overview():page==="checks"?checksPage():page==="inspections"?inspectionPage():page==="incidents"?incidentPage():settingsPage()}</main>
 <footer>Space Ops · ${esc(data?.local.machine??"")} · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</footer></div>
-<nav class="tabbar">${nav.map(([p,i])=>`<button class="${page===p?"selected":""}" data-page="${p}">${icon(i)}<span>${t(p)}</span>${p==="incidents"&&active?`<i class="tab-badge">${active}</i>`:""}</button>`).join("")}</nav>`;
+<nav class="tabbar">${nav.map(([p,i])=>`<button class="${page===p?"selected":""}" data-page="${p}">${icon(i)}<span>${t(p)}</span>${p==="incidents"&&active?`<i class="tab-badge">${active}</i>`:p==="inspections"&&late?`<i class="tab-badge soft">${late}</i>`:""}</button>`).join("")}</nav>`;
   bind();
 }
 function row(c:Listed,opts:{status?:string;label?:string;time?:string}={}){const [i,tint]=kindIcon(c.kind),s=opts.status??shown(c);return `<button class="row" data-check="${esc(c.id)}" data-host="${esc(c.machine)}">${sym(i,tint)}<span class="row-main"><strong>${esc(c.name)}</strong><small>${esc(c.machine)} · ${esc(c.app)} · ${t(c.coverage)}</small></span><span class="row-trail">${badge(s,opts.label)}<small>${opts.time??ago(c.observedAt)}</small></span>${icon("chevron","chev")}</button>`;}
@@ -85,6 +87,19 @@ function checksPage(){
   filtered.sort((a,b)=>(order[shown(a)]??9)-(order[shown(b)]??9)||a.name.localeCompare(b.name));
   return `<div class="filterbar"><div class="segmented" role="tablist">${["all","attention","transient","unknown","paused"].map(f=>{const n=cs.filter(c=>matches(c,f)).length;return `<button role="tab" data-filter="${f}" class="${filter===f?"active":""}" aria-selected="${filter===f}">${t(f as Key)}${f!=="all"&&n?` <span>${n}</span>`:""}</button>`;}).join("")}</div><label class="search">${icon("search")}<input id="search" type="search" value="${esc(query)}" placeholder="${t("search")}" aria-label="${t("search")}"></label></div>
 ${list(filtered.map(c=>row(c,shown(c)==="transient"?{time:ago(c.failedAt??c.observedAt)}:{})),t("noMatch"),"search")}<div class="list-foot"><span>${filtered.length} / ${cs.length} ${t("count")}</span><button class="link" id="export">${icon("download")}${t("export")}</button></div><p class="group-foot">${t("notVerified")}</p>`;
+}
+type ListedInspection=Inspection&{machine:string};
+/** Every machine's declared app checks; a peer's readings go unknown with its snapshot. */
+function inspections():ListedInspection[]{if(!data)return[];return [...(data.local.inspections??[]).map(i=>({...i,machine:data!.local.machine,...(!localFresh()?{state:"unknown" as const,detail:t("stale")}:{})})),...data.peers.flatMap(p=>(p.snapshot?.inspections??[]).map(i=>({...i,machine:p.name,...(p.status==="unknown"?{state:"unknown" as const,detail:p.error??t("stale")}:{})})))].filter(i=>machine==="all"||i.machine===machine);}
+const inspText=(i:Inspection)=>({title:i.i18n?.[lang]?.title??i.title??i.name,app:i.i18n?.[lang]?.appTitle??i.appTitle,description:i.i18n?.[lang]?.description??i.description});
+function inspectionPage(){
+  const all=inspections(),order:Record<string,number>={late:0,unknown:1,pending:2,done:3,off:4};
+  const shownList=all.filter(i=>filter==="all"||i.state===filter).filter(i=>{const x=inspText(i);return `${x.title} ${x.app} ${i.machine}`.toLowerCase().includes(query.toLowerCase());}).sort((a,b)=>(order[a.state]??9)-(order[b.state]??9)||inspText(a).app.localeCompare(inspText(b).app)||inspText(a).title.localeCompare(inspText(b).title));
+  const rowOf=(i:ListedInspection)=>{const x=inspText(i),icon_=i.state==="done"?["check","green"]:i.state==="late"?["warn","orange"]:i.state==="pending"?["clock","blue"]:i.state==="off"?["moon","gray"]:["question","gray"];
+    const due=i.due?`${t("dueAt").replace("{t}",i.due)}${i.timezone?` (${i.timezone})`:""}`:t("noDue");
+    return `<div class="row static tall" title="${esc(i.detail)}">${sym(icon_[0]!,icon_[1]!)}<span class="row-main"><strong>${esc(x.title)}</strong>${x.description?`<p>${esc(x.description)}</p>`:""}<small>${esc(i.machine)} · ${esc(x.app)} · ${esc(due)}${i.state!=="done"&&i.doneAt?` · ${t("lastDone")} ${ago(i.doneAt)}`:""}</small>${i.state==="unknown"?`<small class="muted">${esc(i.detail)}</small>`:""}</span><span class="row-trail">${badge(i.state,t(`st_${i.state}` as Key))}<small>${ago(i.observedAt)}</small></span></div>`;};
+  return `<div class="filterbar"><div class="segmented" role="tablist">${["all","late","pending","done","off","unknown"].map(f=>{const n=all.filter(i=>f==="all"||i.state===f).length;return `<button role="tab" data-filter="${f}" class="${filter===f?"active":""}" aria-selected="${filter===f}">${t(f==="all"?"all":`st_${f}` as Key)}${f!=="all"&&n?` <span>${n}</span>`:""}</button>`;}).join("")}</div><label class="search">${icon("search")}<input id="search" type="search" value="${esc(query)}" placeholder="${t("searchInspections")}" aria-label="${t("searchInspections")}"></label></div>
+${all.length?list(shownList.map(rowOf),t("noMatch"),"search"):`<div class="card empty">${sym("clipboard","teal","large")}<h3>${t("inspectionsEmpty")}</h3><p>${t("inspectionsHow")}</p></div>`}<p class="group-foot">${t("inspectionsNote")}</p>`;
 }
 function incidentPage(){
   const all=incidents(),is=all.filter(i=>filter==="all"||filter==="attention"&&i.status!=="resolved"||i.status===filter);

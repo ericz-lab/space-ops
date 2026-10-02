@@ -23,6 +23,12 @@ Space provisions the SQLite database, service environment and panel widget throu
 - **Result timestamp:** `evidenceTimestampPath` (for example `$.latest.finishedAt`) marks each distinct value as one execution. Re-reading the same failed result does not count as another failure, so one failed run stays a one-off error until another run fails. Missing data and invalid types produce unknown, except an explicit existence assertion fails.
 - **Coverage:** service reachability and task execution do not verify business output. Add data assertions against the app's existing JSON API to verify freshness, counts or completion. This release does not infer business calendars, content correctness or causal dependencies.
 
+### Inspection (点检)
+
+Apps declare the day's work in their `space.yaml` under `checks:` (ai-space docs/app-spec.md#checks); Space lists them at `GET /api/checks` with the loopback URL to read. Each scan reads every declared check (GET, 8 s, no redirects, 2 MB, this machine's loopback only) and shows it on the Inspection page as **done**, **pending** (not done before its `due` time), **late** (not done after `due`, or with no `due`), **off** (its `when` assertions fail: nothing is due today) or **unknown** (unreachable, missing field, or a reading older than the scan lease). The page also shows when each item was last done.
+
+An inspection item is not a check of the fault model: it never opens an incident, never notifies and is not counted in the overview. Being not done yet is usually only "not time yet"; business calendars belong to the app, which answers `open`/`done` for the session it expects. Snapshots carry `inspections`, so the hub shows its peers' items read-only. A failing `GET /api/checks` is the `Space checks` source check, like the other discovery sources.
+
 ### One-off errors
 
 A failure below its incident threshold is a **one-off error** (`transient`): a single failed or skipped task run, or a probe failing fewer than `failAfter` times. It is never healthy, never an incident and never notified; the overview lists it apart from what needs attention, together with checks that failed in the last 24 hours and pass again ("cleared"). A repeat failure that reaches the threshold opens an incident. A running task within its deadline shows as running, not as missing evidence.

@@ -82,6 +82,13 @@ export function assertionsResult(data: unknown, assertions: Assertion[], now: nu
       if (got < due) return { verdict: "fail", code: "daily_deadline_missed", detail: `${a.path}: latest ${got} (${timezone}); ${due} expected by ${a.value}` };
       continue;
     }
+    if (a.operator === "today") {
+      if (!validInstant(actual)) return { verdict: "unknown", code: "invalid_timestamp", detail: `${a.path}: expected an ISO timestamp with timezone` };
+      if (Date.parse(actual) - now > 60_000) return { verdict: "unknown", code: "clock_skew", detail: `${a.path}: timestamp is in the future` };
+      const today = localParts(now, timezone).date, got = localParts(Date.parse(actual), timezone).date;
+      if (got !== today) return { verdict: "fail", code: "not_today", detail: `${a.path}: latest ${got}, not today ${today} (${timezone})` };
+      continue;
+    }
     if (!pass) return { verdict: "fail", code: "assertion_failed", detail: `${a.path} ${a.operator} ${JSON.stringify(a.value)}: assertion failed (actual: ${JSON.stringify(actual).slice(0, 160)})` };
   }
   return { verdict: "pass", code: "assertions_passed", detail: `${assertions.length} assertions passed` };
