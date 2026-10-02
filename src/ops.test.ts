@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
-import { httpProbe, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
+import { httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
 import { DEFAULT_SETTINGS, type Sample } from "./types.ts";
@@ -305,5 +305,19 @@ describe("Task policies",()=>{
     const dash=await (await handler(new Request("http://ops.test/api/dashboard"))).json() as {taskPolicies:Record<string,unknown>};
     expect(dash.taskPolicies.us).toEqual({deadlineMinutes:60,errorThreshold:1});
     await put("us",{});expect(s.get("taskPolicy","us")).toBeNull();
+  });
+});
+
+describe("Repeated skips",()=>{
+  const now=Date.parse("2026-10-02T03:00:00Z"), at=(h:number)=>now-h*3_600_000, skip=(h:number)=>({status:"skipped",startedAt:at(h),endedAt:at(h)});
+  test("skips after a recent success mean up to date",()=>{
+    expect(repeatedSkip([skip(0),skip(.5),skip(1),{status:"ok",startedAt:at(1.5),endedAt:at(1.5)}],now)).toBe(false);
+  });
+  test("skips with no success in a day are a failure",()=>{
+    expect(repeatedSkip([skip(0),skip(.5),skip(1),{status:"ok",startedAt:at(30),endedAt:at(30)}],now)).toBe(true);
+    expect(repeatedSkip([skip(0),skip(.5),skip(1)],now)).toBe(true);
+  });
+  test("fewer than three skips is not repeated",()=>{
+    expect(repeatedSkip([skip(0),skip(.5),{status:"error"}],now)).toBe(false);
   });
 });

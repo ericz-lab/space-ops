@@ -54,6 +54,13 @@ export function taskSample(t: Task, settings: Settings, now = Date.now(), policy
   if (!s.lastRunAt) return { ...base, verdict: "unknown", code: "task_never_run", detail: "No completed execution has been observed" };
   return base;
 }
+// A no-op run ("inputs unchanged") is normal for a polling task; skips count only once nothing has succeeded for a day.
+export type TaskRun = { status: string; startedAt?: number; endedAt?: number };
+export function repeatedSkip(runs: TaskRun[], now = Date.now()): boolean {
+  if (runs.length < 3 || !runs.slice(0, 3).every(r => r.status === "skipped")) return false;
+  const ok = runs.find(r => r.status === "ok"), at = ok?.endedAt ?? ok?.startedAt;
+  return !Number.isFinite(at) || now - at! > 86_400_000;
+}
 export async function hostSamples(dir: string, settings: Settings): Promise<Sample[]> {
   let available=freemem();
   if (process.platform === "linux") {
