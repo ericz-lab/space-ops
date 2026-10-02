@@ -42,7 +42,17 @@ export function api(engine: Engine) {
         if(Object.keys(policy).length)store.put("taskPolicy",id,policy);else store.db.query("DELETE FROM documents WHERE kind='taskPolicy' AND id=?").run(id);
         void engine.scan().catch(()=>{});return json({ok:true,policy});
       }
-      if (path.startsWith("/api/incidents/") && req.method === "POST") {const id=decodeURIComponent(path.slice(15));return json({ok:true,incident:store.acknowledge(id)});}
+      if (req.method === "GET" && path.startsWith("/api/scans/")) { const at=Date.parse(decodeURIComponent(path.slice(11))), record=Number.isFinite(at)?store.scanRecord(at):null; return record?json({ok:true,record}):json({ok:false,error:"Scan not found"},404); }
+      const incidentPath=req.method === "POST" ? path.match(/^\/api\/incidents(?:\/([^/]+)(?:\/(ack|notes|resolve))?)?$/) : null;
+      if (incidentPath) {
+        // The Space ingress (Cloudflare Access) names the operator; without it the record is anonymous.
+        const by=(req.headers.get("cf-access-authenticated-user-email")??"").slice(0,200)||undefined, b=await body(), id=incidentPath[1]?decodeURIComponent(incidentPath[1]):null, action=incidentPath[2]??(id?"ack":"create");
+        const text=(key:string,max:number,required=false)=>{const v=b[key]===undefined||b[key]===null?"":b[key];if(typeof v!=="string"||v.trim().length>max||(required&&!v.trim()))throw new Error(`Invalid ${key}`);return v.trim();};
+        if (action==="create") { if(b.severity!==undefined&&!["warning","critical"].includes(b.severity))throw new Error("Invalid severity");return json({ok:true,incident:store.createIncident({checkId:text("checkId",300)||undefined,name:text("name",120,!b.checkId),app:text("app",80)||undefined,detail:text("detail",2000),severity:b.severity,by})},201); }
+        if (action==="notes") return json({ok:true,incident:store.note(id!,text("text",2000,true),by)});
+        if (action==="resolve") return json({ok:true,incident:store.resolve(id!,text("text",2000),by)});
+        return json({ok:true,incident:store.acknowledge(id!,Date.now(),by)});
+      }
       if (path === "/api/settings" && req.method === "PUT") {
         const b=await body(), s=store.settings();
         for (const [key,min,max] of [["scanMinutes",1,60],["failAfter",1,20],["recoverAfter",1,20],["taskErrorThreshold",1,20],["diskPercent",50,99],["memoryPercent",50,99]] as const) { if(b[key]!==undefined){if(!Number.isInteger(b[key])||b[key]<min||b[key]>max)throw new Error(`Invalid ${key}`);s[key]=b[key];} }

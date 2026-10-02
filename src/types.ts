@@ -13,7 +13,11 @@ export type Rule = {
 };
 export type Sample = { id: string; name: string; app: string; kind: string; verdict: Verdict; code: string; detail: string; value?: number | string; threshold?: number | string; latencyMs?: number; evidenceAt?: string; coverage: "availability" | "execution" | "assertion" | "host"; failAfter?: number; recoverAfter?: number; severity?: "warning" | "critical"; staleAfterMs?: number; transient?: boolean };
 export type Check = Sample & { status: Status; failures: number; successes: number; observedAt: string; lastPassedAt: string | null; failedAt?: string | null; mutedUntil: string | null; enabled: boolean };
-export type Incident = { id: string; checkId: string; name: string; app: string; severity: "warning" | "critical"; status: "open" | "acknowledged" | "resolved"; openedAt: string; updatedAt: string; resolvedAt: string | null; detail: string; events: { at: string; type: string; detail: string }[] };
+export type IncidentEvent = { at: string; type: string; detail: string; by?: string };
+/** `manual`: created by an operator; it stays open until an operator resolves it. `resolvedBy` names who closed it ("check" when the check recovered). */
+export type Incident = { id: string; checkId: string; name: string; app: string; severity: "warning" | "critical"; status: "open" | "acknowledged" | "resolved"; openedAt: string; updatedAt: string; resolvedAt: string | null; detail: string; source?: "auto" | "manual"; resolvedBy?: string; events: IncidentEvent[] };
+/** Non-passing observations of one scan: from just after the previous scan to this one. */
+export type ScanRecord = { at: string; previousAt: string | null; checks: { id: string; name: string; app: string; kind: string; status: string; verdict: string; code: string; at: string }[] };
 export type Snapshot = { version: 1; machine: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[] };
 export type PeerView = { name: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null };
 /** Operator policy for one local task: success due within `deadlineMinutes` of its start; `errorThreshold` overrides the global one. */

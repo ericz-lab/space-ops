@@ -31,6 +31,14 @@ A failure below its incident threshold is a **one-off error** (`transient`): a s
 
 Each rule has opening/recovery thresholds. Incidents are persisted separately from observations. Unknown does not resolve an incident; acknowledgement, notification mute and pause also leave it open. Consecutive passing observations close it with evidence. Paused custom probes do not run. Automatic checks can be paused without changing the underlying service or task.
 
+Incidents are also the operator's fault record (故障事件):
+
+- **Open one by hand** from any check (one open incident per check) or for something no check covers. An operator's incident stays open until someone marks it resolved; the check recovering is recorded on it, not acted on.
+- **Repair records** (notes) can be added to any incident, open or resolved. The opening event, notes, acknowledgement and resolution are never trimmed from the timeline.
+- **Mark resolved** closes any incident with an optional resolution note. A check still failing then counts from zero: it opens a new incident only after failing `failAfter` times again (a re-read of the same failed result does not count).
+- Records name the operator from the Space ingress identity (`cf-access-authenticated-user-email`) when present.
+- **Scan records:** each bar of the overview's scan history opens what was wrong at that time: the incidents open then and, for the local machine, every check that was failing, one-off or recovering in that scan.
+
 The collector runs independently of Space tasks. It scans every 5 minutes by default; Settings changes the interval (1–60 minutes) without a restart. It never overlaps its own scans, caps probe concurrency and preserves its state across restarts. Expired observations become unknown on read, including when the collector itself stops. Custom intervals are minimum intervals; actual start includes collector cadence and scan duration.
 
 ## Peers
@@ -58,7 +66,11 @@ SQLite in `DATABASE_URL`, otherwise `${SPACE_APP_DATA_DIR}/main.db`, otherwise l
 | POST | `/api/scan` | Start a coalesced scan; 202 |
 | POST / PUT | `/api/rules` / `/api/rules/:id` | Create / update a validated custom rule |
 | PATCH | `/api/checks/:id` | `{enabled}` or `{muteMinutes}` |
-| POST | `/api/incidents/:id` | Acknowledge an incident |
+| POST | `/api/incidents` | Open an incident: `{checkId}` or `{name, app?}`, plus `{detail, severity?}`; 201 |
+| POST | `/api/incidents/:id/ack` | Acknowledge (also `POST /api/incidents/:id`) |
+| POST | `/api/incidents/:id/notes` | Add a repair record `{text}` |
+| POST | `/api/incidents/:id/resolve` | Mark resolved, optional `{text}` |
+| GET | `/api/scans/:at` | Non-passing checks of the scan finished at that instant |
 | PUT | `/api/settings` | Local scan interval, detection and notification settings |
 | PUT | `/api/task-policies/:taskId` | `{deadlineMinutes, errorThreshold}`; empty clears |
 | GET | `/api/widget` | Space panel summary |

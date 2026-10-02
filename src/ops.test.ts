@@ -321,3 +321,58 @@ describe("Repeated skips",()=>{
     expect(repeatedSkip([skip(0),skip(.5),{status:"error"}],now)).toBe(false);
   });
 });
+
+describe("Operator incidents",()=>{
+  const fail=(s:Store,n:number,t0=at)=>{for(let i=0;i<n;i++)s.observe(sample,t0+i*1000);};
+  const pass={...sample,verdict:"pass" as const,code:"ok",detail:"Verified"};
+  test("notes and an operator resolution are kept; a still-failing check needs failAfter new failures to reopen",()=>{
+    const s=store();fail(s,3);const id=s.activeIncident("one")!.id;
+    s.note(id,"Restarted the supplier job","ops@example.com",at+5000);
+    const done=s.resolve(id,"Supplier fixed",undefined,at+6000);
+    expect(done).toMatchObject({status:"resolved",resolvedBy:"operator"});
+    expect(done.events.map(e=>e.type)).toEqual(["opened","note","resolved"]);
+    expect(done.events[1]).toMatchObject({detail:"Restarted the supplier job",by:"ops@example.com"});
+    expect(()=>s.resolve(id,"",undefined,at+6500)).toThrow("already resolved");
+    expect(s.observe(sample,at+7000).status).toBe("transient");expect(s.activeIncident("one")).toBeUndefined();
+    fail(s,2,at+8000);expect(s.activeIncident("one")?.id).not.toBe(id);
+  });
+  test("an operator incident on a check stays open when the check recovers, and only one is open per check",()=>{
+    const s=store();s.observe(sample,at);
+    const i=s.createIncident({checkId:"one",detail:"Looks flaky",by:"ops"},at+100);
+    expect(i).toMatchObject({source:"manual",name:"API",app:"example",status:"open"});
+    expect(()=>s.createIncident({checkId:"one",detail:"again"})).toThrow("already open");
+    expect(()=>s.createIncident({checkId:"missing",detail:"x"})).toThrow("Check not found");
+    s.observe(pass,at+1000);s.observe(pass,at+2000);s.observe(pass,at+3000);
+    const kept=s.incident(i.id);expect(kept.status).toBe("open");expect(kept.events.filter(e=>e.type==="recovered")).toHaveLength(1);
+    s.resolve(i.id,"Confirmed fine","ops",at+4000);expect(s.incident(i.id).resolvedBy).toBe("ops");
+    const free=s.createIncident({name:"Router certificate expires soon",detail:"Renew before Friday"},at);
+    expect(free.checkId.startsWith("manual:")).toBe(true);expect(free.app).toBe("custom");
+  });
+  test("operator records survive event trimming",()=>{
+    const s=store();fail(s,3);const id=s.activeIncident("one")!.id;s.note(id,"first note",undefined,at+3000);
+    for(let i=0;i<150;i++)s.observe({...sample,detail:`Wrong output ${i}`},at+4000+i);
+    const e=s.incident(id).events;expect(e).toHaveLength(100);expect(e[0]!.type).toBe("opened");expect(e.some(x=>x.detail==="first note")).toBe(true);expect(e.at(-1)!.detail).toBe("Wrong output 149");
+  });
+  test("a scan record lists what failed in that scan only",()=>{
+    const s=store();s.observe(sample,at);s.observe({...sample,id:"two",name:"Other"},at+10);s.finishScan(at+100);
+    s.observe(pass,at+200);s.finishScan(at+300);
+    expect(s.scanRecord(at+100)!.checks.map(c=>[c.id,c.status])).toEqual([["one","transient"],["two","transient"]]);
+    expect(s.scanRecord(at+300)!).toMatchObject({previousAt:new Date(at+100).toISOString(),checks:[]});
+    expect(s.scanRecord(at+999)).toBeNull();
+  });
+  test("API: create, note, resolve, acknowledge; validation and the access identity",async()=>{
+    const s=store(),handler=api(new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30}));fail(s,3);
+    const post=(path:string,body:unknown,extra:Record<string,string>={})=>handler(new Request(`http://ops.test${path}`,{method:"POST",headers:{"content-type":"application/json",origin:"http://ops.test",...extra},body:JSON.stringify(body)}));
+    const auto=s.activeIncident("one")!.id;
+    expect((await post(`/api/incidents/${auto}/notes`,{text:" "})).status).toBe(400);
+    const noted=await (await post(`/api/incidents/${auto}/notes`,{text:"Checked logs"},{"cf-access-authenticated-user-email":"eric@example.com"})).json();
+    expect(noted.incident.events.at(-1)).toMatchObject({type:"note",by:"eric@example.com"});
+    expect((await post(`/api/incidents/${auto}`,{})).status).toBe(200);expect(s.incident(auto).status).toBe("acknowledged");
+    expect((await post(`/api/incidents/${auto}/resolve`,{text:"Fixed"})).status).toBe(200);
+    expect((await post(`/api/incidents/${auto}/resolve`,{})).status).toBe(400);
+    expect((await post("/api/incidents",{detail:"no name"})).status).toBe(400);
+    expect((await post("/api/incidents",{name:"Disk swap",detail:"Planned",severity:"fatal"})).status).toBe(400);
+    const made=await post("/api/incidents",{checkId:"one",detail:"Escalated"});expect(made.status).toBe(201);
+    expect((await post("/api/incidents/nope/notes",{text:"x"})).status).toBe(400);
+  });
+});
