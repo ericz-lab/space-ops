@@ -42,6 +42,9 @@ export class Engine {
       source("tasks", async () => {
         const d = await get("/api/tasks"); if (!Array.isArray(d.tasks)) throw new Error("Invalid tasks response");
         const tasks = (d.tasks as Task[]).filter(t=>t.enabled && !t.orphaned);
+        // The list answered: a task check whose task is gone, orphaned or disabled is retired, not left unknown forever.
+        const live = new Set(tasks.map(t=>`task:${t.id}`));
+        for (const c of this.store.list<Check>("check")) if (c.kind === "task" && !live.has(c.id)) this.store.retire(c.id,"Task is no longer declared or is disabled; check retired",now);
         await pool(tasks, 4, async t => {
           let s = taskSample(t,settings,now,this.store.get<TaskPolicy>("taskPolicy",t.id) ?? {});
           if (t.state.lastStatus === "skipped") {

@@ -69,6 +69,12 @@ export class Store {
     this.put("check", id, c);
     const i = this.activeIncident(id); if (i) { i.events.push({ at: new Date(now).toISOString(), type: patch.enabled === false ? "paused" : "configuration", detail: JSON.stringify(patch) }); this.put("incident", i.id, i); }
   }
+  /** Forget a check whose resource is gone (a task no longer declared or disabled). An automatic incident on it is resolved; an operator's stays open. */
+  retire(id: string, detail: string, now = Date.now()) {
+    const i = this.activeIncident(id), at = new Date(now).toISOString();
+    if (i && i.source !== "manual") { i.status = "resolved"; i.resolvedAt = at; i.resolvedBy = "retired"; i.updatedAt = at; i.events.push({ at, type: "resolved", detail }); this.put("incident", i.id, i); }
+    this.db.query("DELETE FROM documents WHERE kind IN ('check','control') AND id=?").run(id);
+  }
   acknowledge(id: string, now = Date.now(), by?: string) {
     const i = this.get<Incident>("incident", id); if (!i) throw new Error("Incident not found");
     if (i.status === "open") { i.status = "acknowledged"; i.events.push({ at: new Date(now).toISOString(), type: "acknowledged", detail: "Acknowledged by operator", ...(by ? { by } : {}) }); this.put("incident", id, i); }

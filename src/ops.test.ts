@@ -124,6 +124,14 @@ describe("Collector and API",()=>{
     await e.scan();expect(s.get<CheckLike>("check","service:app")?.status).toBe("healthy");
     online=false;await e.scan();expect(s.get<CheckLike>("check","service:app")?.status).toBe("unknown");
   });
+  test("a task that is no longer declared retires its check instead of staying unknown",async()=>{
+    const s=store();let tasks:unknown[]=[{id:"t1",app:"app",name:"job",enabled:true,orphaned:false,timeoutMs:60000,state:{lastStatus:"error",lastRunAt:new Date().toISOString(),lastDurationMs:10,consecutiveErrors:3}}];let online=true;
+    const e=engine(s,mockFetch(url=>{if(url.endsWith("tasks")){if(!online)throw new Error("offline");return{tasks};}return url.endsWith("services")?{services:[]}:{peers:[]};}));
+    for(let i=0;i<3;i++)await e.scan();expect(s.get<CheckLike>("check","task:t1")?.status).toBe("failing");expect(s.activeIncident("task:t1")).toBeDefined();
+    online=false;await e.scan();expect(s.get<CheckLike>("check","task:t1")?.status).toBe("unknown");
+    online=true;tasks=[{...(tasks[0] as object),orphaned:true}];await e.scan();
+    expect(s.get<CheckLike>("check","task:t1")).toBeNull();expect(s.activeIncident("task:t1")).toBeUndefined();
+  });
   test("peer failure preserves the last snapshot but marks it unknown",async()=>{
     const s=store();let online=true;
     const e=engine(s,mockFetch(url=>{if(url.includes("/proxy/")){if(!online)throw new Error("offline");return{version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),checks:[],incidents:[],history:[]};}return url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[{name:"remote"}]};}));
@@ -214,7 +222,8 @@ describe("One-off errors",()=>{
   test("absent resources lose their one-off state",async()=>{
     const s=store();s.observe({...taskSample(task,DEFAULT_SETTINGS,at),id:"task:gone"},at);
     await new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(url=>url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[]})).scan();
-    expect(s.get<CheckLike>("check","task:gone")?.status).toBe("unknown");
+    // The task list answered without it: the check is retired, so no one-off state can linger.
+    expect(s.get<CheckLike>("check","task:gone")).toBeNull();
   });
   test("re-reading the same failed result counts once; a new failed result counts again",async()=>{
     const s=store(),rule=validateRule({name:"Sync",url:"http://example.test",failAfter:2,evidenceTimestampPath:"$.latest.finishedAt",assertions:[{path:"$.latest.failed",operator:"eq",value:0}]});
