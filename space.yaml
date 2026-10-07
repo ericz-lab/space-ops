@@ -24,3 +24,8 @@ widgets:
     link: /
     size: 2x1
     refresh: 60s
+
+# `space app deploy` (the post-receive hook) runs these after checkout, after bun install
+# --frozen-lockfile; a failure keeps the running service (ai-space docs/app-spec.md#deploy).
+deploy:
+  check: [bun run typecheck, bun test]
