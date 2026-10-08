@@ -1,6 +1,6 @@
 import { validateRule } from "./rules.ts";
 import type { Engine } from "./engine.ts";
-import type { Check, Settings, TaskPolicy } from "./types.ts";
+import type { Check, Settings, Snapshot, TaskPolicy } from "./types.ts";
 
 export function api(engine: Engine) {
   const store = engine.store;
@@ -22,7 +22,7 @@ export function api(engine: Engine) {
       if (path === "/healthz") { const last=store.get<number>("meta","scan"); const ok=!!last && Date.now()-last<engine.leaseMs(); return json({ok,lastScanAt:last?new Date(last).toISOString():null},ok?200:503); }
       if (req.method === "GET" && path === "/api/snapshot") return json(engine.snapshot());
       if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind='taskPolicy'").all() as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)])),busy:engine.busy(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
-      if (req.method === "GET" && path === "/api/widget") { const s=engine.snapshot(); return json({ok:true,items:[{text:`${s.machine}: ${s.checks.filter(c=>c.status==="healthy").length}/${s.checks.length} checks healthy${s.checks.some(c=>c.status==="transient")?` · ${s.checks.filter(c=>c.status==="transient").length} one-off`:""}`,url:"/",time:s.generatedAt},...s.incidents.filter(i=>i.status!=="resolved").slice(0,4).map(i=>({text:i.name,url:"/#incidents",time:i.openedAt}))]}); }
+      if (req.method === "GET" && path === "/api/widget") return json(widget(engine.snapshot()));
       if (req.method === "GET" && path.startsWith("/api/checks/")) { const id=decodeURIComponent(path.slice(12)); return json({ok:true,check:store.get<Check>("check",id),history:store.history(id)}); }
       if (req.method === "POST" && path === "/api/scan") { void engine.scan().catch(()=>{}); return json({ok:true},202); }
       if (req.method === "POST" && path === "/api/rules") { const rule=validateRule(await body()); if(store.rules().length>=100) throw new Error("At most 100 custom rules");store.put("rule",rule.id,rule);void engine.scan().catch(()=>{});return json({ok:true,rule},201); }
@@ -62,4 +62,21 @@ export function api(engine: Engine) {
       return json({ok:false,error:"Not found"},404);
     } catch(e) {return json({ok:false,error:e instanceof Error?e.message:"Request failed"},400);}
   };
+}
+
+/** The panel card (ai-space docs/app-spec.md): the list for older panels, state blocks for current ones. */
+export function widget(s: Snapshot) {
+  const by=(st:string)=>s.checks.filter(c=>c.status===st).length, healthy=by("healthy"), failing=by("failing"), transient=by("transient"), unknown=by("unknown");
+  const open=s.incidents.filter(i=>i.status!=="resolved"), critical=open.some(i=>i.severity==="critical");
+  const items=[{text:`${s.machine}: ${healthy}/${s.checks.length} checks healthy${transient?` · ${transient} one-off`:""}`,url:"/",time:s.generatedAt},...open.slice(0,4).map(i=>({text:i.name,url:"/#incidents",time:i.openedAt}))];
+  const blocks=[
+    {type:"progress",label:{en:`Healthy checks · ${s.machine}`,zh:`健康检查 · ${s.machine}`},value:healthy,max:Math.max(s.checks.length,1),display:`${healthy}/${s.checks.length}`,tone:healthy===s.checks.length?"positive":failing?"negative":"warning",url:"/"},
+    {type:"metric",label:{en:"Open incidents",zh:"未结事件"},value:open.length,tone:open.length?(critical?"negative":"warning"):"positive",url:"/#incidents"},
+    {type:"trend",label:{en:"Failing per scan",zh:"每轮失败数"},caption:{en:`last ${s.history.length} scans`,zh:`最近 ${s.history.length} 轮巡检`},style:"bar",points:s.history.map(h=>({t:h.at,v:h.failing+(h.transient??0)}))},
+    {type:"metric",label:{en:"Failing",zh:"失败"},value:failing,tone:failing?"negative":"neutral"},
+    {type:"metric",label:{en:"One-off",zh:"偶发"},value:transient,caption:{en:"failed once, not yet confirmed",zh:"单次失败，尚未确认"},tone:transient?"warning":"neutral"},
+    {type:"metric",label:{en:"Unknown",zh:"未知"},value:unknown},
+    ...open.slice(0,6).map(i=>({type:"status",label:i.app,value:i.name,time:i.openedAt,tone:i.severity==="critical"?"negative":"warning",url:"/#incidents"})),
+  ];
+  return {ok:true,items,asOf:s.lastScanAt??s.generatedAt,staleAfter:Math.round(s.staleAfterMs/1000),blocks};
 }

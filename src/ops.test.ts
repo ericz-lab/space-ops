@@ -6,7 +6,7 @@ import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
 import { declaredNoop, httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import { Engine } from "./engine.ts";
-import { api } from "./api.ts";
+import { api, widget } from "./api.ts";
 import { DEFAULT_SETTINGS, type DeclaredCheck, type Sample } from "./types.ts";
 import { declared, evaluate, inspect } from "./inspections.ts";
 
@@ -442,5 +442,21 @@ describe("Inspections (点检)",()=>{
   test("only reads this machine's loopback",async()=>{
     expect((await inspect({...hk,url:"http://example.com/x"},mockFetch(()=>({})),now)).state).toBe("unknown");
     expect(declared({checks:[hk,{id:1}]})).toEqual([hk]);
+  });
+});
+
+describe("Widget",()=>{
+  test("blocks: healthy share first, incidents by severity, failing per scan from the recorded scans only",()=>{
+    const s=store();
+    s.observe({...sample,id:"ok",verdict:"pass",code:"ok"},at);
+    s.observe(sample,at);s.observe(sample,at+1);s.observe(sample,at+2);
+    const w=widget(s.snapshot("local",at+3,600000));
+    expect(w.items[0]?.text).toBe("local: 1/2 checks healthy");
+    expect(w.staleAfter).toBe(600);
+    expect(w.blocks[0]).toMatchObject({type:"progress",value:1,max:2,display:"1/2",tone:"negative"});
+    expect(w.blocks[1]).toMatchObject({type:"metric",value:1,tone:"warning"});
+    expect(w.blocks[2]).toMatchObject({type:"trend",style:"bar"});
+    expect((w.blocks[2] as {points:unknown[]}).points).toHaveLength(s.snapshot("local",at+3).history.length);
+    expect(w.blocks.at(-1)).toMatchObject({type:"status",label:"example",value:"API",tone:"warning"});
   });
 });
