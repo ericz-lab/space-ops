@@ -47,6 +47,14 @@ Incidents are also the operator's fault record (故障事件):
 
 The collector runs independently of Space tasks. It scans every 5 minutes by default; Settings changes the interval (1–60 minutes) without a restart. It never overlaps its own scans, caps probe concurrency and preserves its state across restarts. Expired observations become unknown on read, including when the collector itself stops. Custom intervals are minimum intervals; actual start includes collector cadence and scan duration.
 
+## Diagnosis (一键排查)
+
+**Diagnose** in the toolbar (or on the Reports page) starts one AI diagnosis of this machine. Space Ops gathers the evidence it can read, bounded: the latest scan (every check that is not healthy, with code, value and timestamps), open incidents and those resolved in the last day, the last runs of failing tasks with their errors, failed model calls in the last day from the Space ledger, the recent log of each application with a problem, and the peers' collector status. An agent on the Space model service (tag `diagnose`, default `codex/advanced` from `space.yaml`, resolved to the model of that tier; Settings → App models can override it) writes a report: conclusion, scope, findings with evidence, likely cause and suggested action, and the checks it could not complete. It analyses the evidence it is given and has no shell: the runtime may run on another host. Nothing is repaired.
+
+- One run at a time: the button is disabled while a run is in flight and a second request answers `409` with the running report. The run continues if the page is closed; the page follows it every few seconds.
+- Every run is a report on the **Reports** page, kept in SQLite (the latest 200), with status (running, completed, failed), time, target, the evidence sources and whether each was read, the model that answered, and the report. A run that fails or times out (15 minutes) keeps its reason and offers **Retry**; one cut by a restart is marked failed on boot.
+- Service logs are read through `OPS_LOGS_COMMAND` (`{app}`, `{lines}`), set per machine in the workspace `.env` and passed in by `space.yaml`. Without it the report lists the logs as not checked.
+
 ## Peers
 
 Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. Peer data and controls are read-only in the hub UI.
@@ -79,6 +87,9 @@ SQLite in `DATABASE_URL`, otherwise `${SPACE_APP_DATA_DIR}/main.db`, otherwise l
 | GET | `/api/scans/:at` | Non-passing checks of the scan finished at that instant |
 | PUT | `/api/settings` | Local scan interval, detection and notification settings |
 | PUT | `/api/task-policies/:taskId` | `{deadlineMinutes, errorThreshold}`; empty clears |
+| GET | `/api/reports` | Diagnosis reports, newest first, without their body |
+| GET | `/api/reports/:id` | One report with its body |
+| POST | `/api/reports` | Start a diagnosis `{lang}`; 202, or 409 with the running report |
 | GET | `/api/widget` | Space panel summary |
 
 Mutation endpoints require JSON and an HTTP(S) Origin matching the request host and port (TLS terminates at Space ingress); cross-site browser requests are rejected. This is CSRF protection, not identity authentication. Loopback and the configured private access layer establish identity. Peer snapshot reads must travel through the authenticated Space peer connection or a private tunnel.

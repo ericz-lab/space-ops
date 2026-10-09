@@ -5,6 +5,7 @@ import page from "../web/index.html";
 import { Store } from "./store.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
+import { Diagnosis } from "./diagnose.ts";
 
 const dir=process.env.SPACE_APP_DATA_DIR || join(import.meta.dir,"../data");
 mkdirSync(dir,{recursive:true});
@@ -17,7 +18,9 @@ if(!Number.isInteger(retentionDays)||retentionDays<1||retentionDays>365)throw ne
 const peers=JSON.parse(process.env.OPS_PEERS??"[]") as {name:string;url:string}[];
 if(!Array.isArray(peers)||peers.some(p=>typeof p.name!=="string"||!/^https?:\/\//.test(p.url)))throw new Error("Invalid OPS_PEERS");
 const engine=new Engine(store,{api:(process.env.SPACE_API_URL??"http://127.0.0.1:8700").replace(/\/$/,""),machine:process.env.SPACE_NAME||hostname(),dataDir:dir,retentionDays,appToken:process.env.SPACE_APP_TOKEN,peers});
-const handler=api(engine);
+store.interruptReports();
+const diagnosis=new Diagnosis(engine,{logsCommand:process.env.OPS_LOGS_COMMAND?.trim()||undefined});
+const handler=api(engine,diagnosis);
 const server=Bun.serve({hostname:"127.0.0.1",port:Number(process.env.PORT??8998),maxRequestBodySize:32768,routes:{"/":page,"/icon.svg":()=>new Response(Bun.file(join(import.meta.dir,"../icon.svg"))),"/healthz":handler,"/api/*":handler},fetch:()=>new Response("Not found",{status:404}),development:process.env.SPACE_DEV==="1"});
 engine.start();
 console.log(`Space Ops listening on ${server.url}`);

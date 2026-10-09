@@ -30,3 +30,12 @@ export type DeclaredCheck = { id: string; app: string; appTitle: string; name: s
 /** Inspection (点检) state: today's work is done, not due yet, late, not expected today, or unreadable. Never a fault. */
 export type InspectionState = "done" | "pending" | "late" | "off" | "unknown";
 export type Inspection = Omit<DeclaredCheck, "url" | "done" | "when"> & { state: InspectionState; detail: string; observedAt: string; doneAt: string | null; latencyMs?: number };
+/** One AI diagnosis run (一键排查): the evidence it was given, what it checked and the agent's report. */
+export type ReportStatus = "running" | "done" | "failed";
+/** `ok`: no fault found; `issues`: faults found; `incomplete`: the evidence was not enough to say. */
+export type ReportVerdict = "ok" | "issues" | "incomplete";
+/** One evidence source: read in full, read in part, not read (with why), or failed. */
+export type Coverage = { name: string; status: "done" | "partial" | "skipped" | "failed"; detail: string };
+export type Report = { id: string; machine: string; status: ReportStatus; lang: "en" | "zh"; startedAt: string; finishedAt: string | null; by?: string; targets: string[]; coverage: Coverage[]; verdict?: ReportVerdict; summary?: string; body?: string; error?: string; call?: { id?: number; model?: string; runtime?: string; durationMs?: number } };
+/** A report in a list: everything but the body. */
+export type ReportItem = Omit<Report, "body">;

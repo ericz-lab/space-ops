@@ -1,4 +1,5 @@
-import type { Check, Incident, Inspection, PeerView, Rule, ScanRecord, Settings, Snapshot, Status, TaskPolicy } from "../src/types.ts";
+import type { Check, Incident, Inspection, PeerView, Report, ReportItem, Rule, ScanRecord, Settings, Snapshot, Status, TaskPolicy } from "../src/types.ts";
+import { markdown } from "./markdown.ts";
 import { t, tn, lang, setLang, ago, until, date, type Key } from "./i18n.ts";
 
 const paths: Record<string,string> = {
@@ -13,15 +14,16 @@ const paths: Record<string,string> = {
   warn:'<path d="M12 3.5 22 20.5H2z"/><path d="M12 10v4.5M12 17.5h.01"/>',info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5h.01"/>',question:'<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01"/>',
   globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9S14.5 18.4 12 21c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3"/>',cpu:'<rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9.5 2.5V6M14.5 2.5V6M9.5 18v3.5M14.5 18v3.5M2.5 9.5H6M2.5 14.5H6M18 9.5h3.5M18 14.5h3.5"/>',
   download:'<path d="M12 3.5V15m-4.5-4.5L12 15l4.5-4.5M4.5 16.5v4h15v-4"/>',
+  doc:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',spark:'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
 };
 const icon=(name:string,cls="")=>`<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name]??paths.pulse}</svg>`;
 const esc=(s:unknown)=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]!));
-type Dashboard={local:Snapshot;peers:PeerView[];rules:Rule[];settings:Settings;taskPolicies?:Record<string,TaskPolicy>;busy:boolean;scan?:{intervalMs:number;nextAt:string|null};notificationReady:boolean;notificationQueue:{pending:number;failed:number}};
+type Dashboard={local:Snapshot;peers:PeerView[];rules:Rule[];settings:Settings;taskPolicies?:Record<string,TaskPolicy>;busy:boolean;reports?:ReportItem[];diagnosisReady?:boolean;scan?:{intervalMs:number;nextAt:string|null};notificationReady:boolean;notificationQueue:{pending:number;failed:number}};
 type Listed=Check&{machine:string;remote:boolean};
 type ListedIncident=Incident&{machine:string;remote:boolean};
 /** What a row shows: the stored status, plus a running task apart from missing evidence. */
 type Shown=Exclude<Status,"unknown">|"unknown"|"running";
-const PAGES=["overview","checks","inspections","incidents","settings"] as const;
+const PAGES=["overview","checks","inspections","incidents","reports","settings"] as const;
 const SCAN_CHOICES=[1,2,5,10,15,30,60];
 const DAY=86_400_000;
 let data:Dashboard|null=null,page=(location.hash.slice(1)||"overview"),machine="all",filter="all",query="",offline=false;
@@ -30,7 +32,7 @@ let refreshPending=false;
 
 // A peer on an older release still reports a sub-threshold failure as "pending".
 function shown(c:Check):Shown{const s=c.status as string;return s==="pending"?"transient":s==="unknown"&&c.code==="task_running"?"running":s as Shown;}
-const tone:Record<string,string>={done:"green",pending:"blue",late:"orange",off:"gray",healthy:"green",resolved:"green",cleared:"green",transient:"orange",failing:"red",open:"red",recovering:"blue",acknowledged:"blue",running:"blue",unknown:"gray",paused:"gray"};
+const tone:Record<string,string>={failed:"red",pending:"blue",late:"orange",off:"gray",healthy:"green",resolved:"green",cleared:"green",transient:"orange",failing:"red",open:"red",recovering:"blue",acknowledged:"blue",running:"blue",unknown:"gray",paused:"gray"};
 function badge(status:string,label=t(status as Key)??status){return `<span class="badge tone-${tone[status]??"gray"}"><i></i>${esc(label)}</span>`;}
 const kindIcon=(kind:string)=>({service:["server","blue"],task:["clock","indigo"],http:["globe","teal"],host:["cpu","gray"],peer:["layers","purple"],space:["grid","blue"]} as Record<string,[string,string]>)[kind]??["pulse","teal"];
 function sym(name:string,tint:string,cls=""){return `<span class="sym tint-${tint} ${cls}">${icon(name)}</span>`;}
@@ -42,7 +44,13 @@ function cleared(cs:Listed[],is:ListedIncident[]){return cs.filter(c=>shown(c)==
 const matches=(c:Listed,f:string)=>{const s=shown(c);return f==="all"||(f==="attention"?s==="failing"||s==="recovering":s===f);};
 async function request(path:string,method="GET",body?:unknown){const r=await fetch(path,{method,headers:body===undefined?{}:{"content-type":"application/json"},body:body===undefined?undefined:JSON.stringify(body)});const d=await r.json();if(!r.ok||d.ok===false)throw new Error(d.error??`HTTP ${r.status}`);return d;}
 function toast(message:string){const el=document.querySelector<HTMLElement>("#toast")!;el.textContent=message;el.classList.add("show");setTimeout(()=>el.classList.remove("show"),3000);}
-async function load(){if(refreshPending)return;refreshPending=true;try{data=await request("/api/dashboard");offline=false;}catch{offline=true;}finally{refreshPending=false;}if(!document.querySelector("dialog[open]")&&!root.contains(document.activeElement?.closest("input,select,textarea")??null))render();}
+let reportPoll:ReturnType<typeof setTimeout>|undefined,openReport:string|null=null;
+const diagnosing=()=>data?.reports?.find(r=>r.status==="running");
+async function load(){if(refreshPending)return;refreshPending=true;const before=diagnosing()?.id;try{data=await request("/api/dashboard");offline=false;}catch{offline=true;}finally{refreshPending=false;}
+  // While a diagnosis runs, follow it every few seconds; an open drawer of it is redrawn when it ends.
+  clearTimeout(reportPoll);if(diagnosing())reportPoll=setTimeout(()=>void load(),4000);
+  if(before&&!diagnosing()){const done=data?.reports?.find(r=>r.id===before);if(done)toast(t(done.status==="done"?"diagnoseDone":"diagnoseFailed"));if(openReport===before&&document.querySelector("dialog[open]"))void showReport(before);}
+  if(!document.querySelector("dialog[open]")&&!root.contains(document.activeElement?.closest("input,select,textarea")??null))render();}
 function navigate(p:string,f="all"){page=p;location.hash=p;filter=f;query="";render();scrollTo({top:0});}
 const scanMinutes=()=>Math.round((data?.scan?.intervalMs??(data?.settings.scanMinutes??5)*60_000)/60_000);
 function scanLine(){return `${t("lastScan")} ${ago(data?.local.lastScanAt)} · ${tn("everyMinutes",scanMinutes())}${data?.scan?.nextAt?` · ${t("nextScan")} ${until(data.scan.nextAt)}`:""}`;}
@@ -50,13 +58,13 @@ function scanLine(){return `${t("lastScan")} ${ago(data?.local.lastScanAt)} · $
 function render(){
   if(!PAGES.includes(page as typeof PAGES[number]))page="overview";
   const active=incidents().filter(i=>i.status!=="resolved").length;
-  const nav=[["overview","grid","blue"],["checks","pulse","green"],["inspections","clipboard","teal"],["incidents","bell","red"],["settings","gear","gray"]] as const;
+  const nav=[["overview","grid","blue"],["checks","pulse","green"],["inspections","clipboard","teal"],["incidents","bell","red"],["reports","doc","purple"],["settings","gear","gray"]] as const;
   const late=inspections().filter(i=>i.state==="late").length;
   const machines=data?[{name:data.local.machine,ok:localFresh()},...data.peers.map(p=>({name:p.name,ok:p.status==="healthy"}))]:[];
   document.documentElement.lang=lang;
   root.innerHTML=`<aside class="sidebar"><a class="brand" href="#overview"><img src="/icon.svg" alt=""><span>Space Ops</span></a><nav class="source-list"><p class="group-label">${t("workspace")}</p>${nav.map(([p,i,c])=>`<button class="source-item ${page===p?"selected":""}" data-page="${p}">${sym(i,c)}<span>${t(p)}</span>${p==="incidents"&&active?`<span class="count">${active}</span>`:p==="inspections"&&late?`<span class="count soft">${late}</span>`:""}</button>`).join("")}<p class="group-label">${t("machines")}</p><button class="source-item ${machine==="all"?"selected":""}" data-machine="all">${sym("layers","purple")}<span>${t("allMachines")}</span></button>${machines.map(m=>`<button class="source-item ${machine===m.name?"selected":""}" data-machine="${esc(m.name)}">${sym("server",m.ok?"green":"gray")}<span>${esc(m.name)}</span><i class="dot ${m.ok?"on":""}"></i></button>`).join("")}</nav><div class="sidebar-foot"><i class="dot ${localFresh()?"on":"off"}"></i><div><strong>${t(localFresh()?"live":"disconnected")}</strong><small>${data?esc(scanLine()):"—"}</small></div></div></aside>
-<div class="content"><header class="toolbar"><div class="toolbar-title">${t(page as Key)}</div><div class="toolbar-actions">${machines.length>1?`<select class="machine-select" id="machine" aria-label="${t("machines")}"><option value="all">${t("allMachines")}</option>${machines.map(m=>`<option value="${esc(m.name)}" ${machine===m.name?"selected":""}>${esc(m.name)}</option>`).join("")}</select>`:""}<button class="tool-button" id="language" aria-label="${t("language")}">${lang==="zh"?"EN":"中"}</button><button class="tool-button" id="scan" ${data?.busy?"disabled":""} title="${t("scan")}" aria-label="${t("scan")}">${icon("refresh",data?.busy?"spin":"")}<span>${t(data?.busy?"scanning":"scan")}</span></button><button class="tool-button accent" id="new" title="${t("newCheck")}" aria-label="${t("newCheck")}">${icon("plus")}<span>${t("newCheck")}</span></button></div></header>
-<main><div class="large-title"><h1>${t(page as Key)}</h1><p>${t(page==="overview"?"subtitle":page==="checks"?"checksSub":page==="inspections"?"inspectionsSub":page==="incidents"?"incidentsSub":"settingsSub")}</p></div>${offline?`<div class="banner" role="alert">${icon("warn")}${t("loadFailed")}</div>`:""}${!data?`<div class="card empty">${icon("clock")}<h3>${t("noData")}</h3></div>`:page==="overview"?overview():page==="checks"?checksPage():page==="inspections"?inspectionPage():page==="incidents"?incidentPage():settingsPage()}</main>
+<div class="content"><header class="toolbar"><div class="toolbar-title">${t(page as Key)}</div><div class="toolbar-actions">${machines.length>1?`<select class="machine-select" id="machine" aria-label="${t("machines")}"><option value="all">${t("allMachines")}</option>${machines.map(m=>`<option value="${esc(m.name)}" ${machine===m.name?"selected":""}>${esc(m.name)}</option>`).join("")}</select>`:""}<button class="tool-button" id="language" aria-label="${t("language")}">${lang==="zh"?"EN":"中"}</button>${diagnoseButton("tool-button")}<button class="tool-button" id="scan" ${data?.busy?"disabled":""} title="${t("scan")}" aria-label="${t("scan")}">${icon("refresh",data?.busy?"spin":"")}<span>${t(data?.busy?"scanning":"scan")}</span></button><button class="tool-button accent" id="new" title="${t("newCheck")}" aria-label="${t("newCheck")}">${icon("plus")}<span>${t("newCheck")}</span></button></div></header>
+<main><div class="large-title"><h1>${t(page as Key)}</h1><p>${t(page==="overview"?"subtitle":page==="checks"?"checksSub":page==="inspections"?"inspectionsSub":page==="incidents"?"incidentsSub":page==="reports"?"reportsSub":"settingsSub")}</p></div>${offline?`<div class="banner" role="alert">${icon("warn")}${t("loadFailed")}</div>`:""}${!data?`<div class="card empty">${icon("clock")}<h3>${t("noData")}</h3></div>`:page==="overview"?overview():page==="checks"?checksPage():page==="inspections"?inspectionPage():page==="incidents"?incidentPage():page==="reports"?reportsPage():settingsPage()}</main>
 <footer>Space Ops · ${esc(data?.local.machine??"")} · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</footer></div>
 <nav class="tabbar">${nav.map(([p,i])=>`<button class="${page===p?"selected":""}" data-page="${p}">${icon(i)}<span>${t(p)}</span>${p==="incidents"&&active?`<i class="tab-badge">${active}</i>`:p==="inspections"&&late?`<i class="tab-badge soft">${late}</i>`:""}</button>`).join("")}</nav>`;
   bind();
@@ -107,6 +115,35 @@ function incidentPage(){
 ${is.length?`<div class="list">${is.map(incidentRow).join("")}</div>`:`<div class="card empty">${sym("shield","green","large")}<h3>${t("emptyIncidents")}</h3><p>${t("attentionNote")}</p></div>`}`;
 }
 function incidentRow(i:ListedIncident){return `<button class="row tall" data-incident="${esc(i.id)}" data-host="${esc(i.machine)}">${sym(i.status==="resolved"?"check":"bell",i.status==="resolved"?"green":i.severity==="critical"?"red":"orange")}<span class="row-main"><strong>${esc(i.name)}${i.source==="manual"?` <em>${t("manualIncident")}</em>`:""}</strong><p>${esc(i.detail)}</p><small>${esc(i.machine)} · ${esc(i.app)} · ${t("since")} ${ago(i.openedAt)}${i.resolvedAt?` · ${t("recovered")} ${ago(i.resolvedAt)}`:""}</small></span><span class="row-trail">${badge(i.status)}</span>${icon("chevron","chev")}</button>`;}
+/** The one-click diagnosis: disabled while one runs, so a second click cannot start a second run. */
+function diagnoseButton(cls:string){const run=diagnosing(),ready=!!data?.diagnosisReady;return `<button class="${cls}" data-diagnose ${run||!ready?"disabled":""} title="${t(ready?"diagnoseHint":"diagnoseUnavailable")}" aria-label="${t("diagnose")}">${icon(run?"refresh":"spark",run?"spin":"")}<span>${t(run?"diagnosing":"diagnose")}</span></button>`;}
+const vdTone:Record<string,[string,string]>={ok:["shield","green"],issues:["warn","orange"],incomplete:["question","gray"]};
+function reportIcon(r:ReportItem):[string,string]{return r.status==="running"?["refresh","blue"]:r.status==="failed"?["warn","red"]:vdTone[r.verdict??"incomplete"]!;}
+function reportBadge(r:ReportItem){return r.status==="done"?badge(r.verdict==="ok"?"healthy":r.verdict==="issues"?"failing":"unknown",t(`vd_${r.verdict??"incomplete"}` as Key)):badge(r.status,t(`rp_${r.status}` as Key));}
+function reportsPage(){
+  const all=data!.reports??[];
+  return `<div class="callout report-callout">${sym("spark","purple")}<div><strong>${t("diagnoseTitle")}</strong><p>${t(data!.diagnosisReady?"diagnoseHint":"diagnoseUnavailable")}</p></div>${diagnoseButton("button primary small")}</div>
+${groupTitle(t("reportHistory"),all.length)}${all.length?`<div class="list">${all.map(r=>`<button class="row tall" data-report="${esc(r.id)}">${sym(...reportIcon(r),r.status==="running"?"busy":"")}<span class="row-main"><strong>${esc(r.status==="running"?t("diagnosing"):r.status==="failed"?t("rp_failed"):r.summary||t("vd_"+(r.verdict??"incomplete") as Key))}</strong>${r.status==="failed"&&r.error?`<p>${esc(r.error)}</p>`:""}<small>${esc(date(r.startedAt))} · ${t("reportTarget")} ${esc(r.targets.join(", "))}</small></span><span class="row-trail">${reportBadge(r)}<small>${ago(r.startedAt)}</small></span>${icon("chevron","chev")}</button>`).join("")}</div>`:`<div class="card empty">${sym("doc","purple","large")}<h3>${t("reportsEmpty")}</h3><p>${t("reportsHow")}</p></div>`}<p class="group-foot">${t("reportsNote")}</p>`;
+}
+const covTone:Record<string,string>={done:"healthy",partial:"transient",skipped:"unknown",failed:"failing"};
+async function showReport(id:string){
+  openReport=id;let r:Report;
+  try{r=(await request(`/api/reports/${encodeURIComponent(id)}`)).report;}catch(e){toast((e as Error).message);return;}
+  const duration=r.finishedAt?Math.round((Date.parse(r.finishedAt)-Date.parse(r.startedAt))/1000):null;
+  const facts:[string,string][]=[[t("reportStarted"),date(r.startedAt)],[t("reportFinished"),r.finishedAt?`${date(r.finishedAt)}${duration!==null?` · ${duration<60?`${duration}${t("seconds")}`:`${Math.round(duration/60)}${t("minutes")}`}`:""}`:"—"],[t("reportTarget"),r.targets.join(", ")],...(r.call?.model?[[t("reportModel"),`${r.call.runtime?`${r.call.runtime} · `:""}${r.call.model}`] as [string,string]]:[]),...(r.by?[[t("reportBy"),r.by] as [string,string]]:[])];
+  modal(`${dialogHead(r.status==="done"?r.summary||t("reportTitle"):t(r.status==="running"?"diagnosing":"rp_failed"),`${r.machine} · ${date(r.startedAt)}`,sym(...reportIcon(r),"large"))}<div class="dialog-body"><div class="status-line">${reportBadge(r)}</div>
+${r.status==="failed"?`<div class="note error">${icon("warn")}<div><strong>${t("reportError")}</strong><p>${esc(r.error??t("error"))}</p></div></div>`:""}${r.status==="running"?`<p class="note">${icon("info")}${t("runningHint")}</p>`:""}
+<div class="list facts">${facts.map(([k,v])=>`<div class="row static"><span class="row-main">${esc(k)}</span><span class="value">${esc(v)}</span></div>`).join("")}</div>
+${r.coverage.length?`<div class="group-title"><h2>${t("reportScope")}</h2></div><div class="list">${r.coverage.map(c=>`<div class="row static"><span class="row-main"><strong>${esc(t(("cov_"+c.name.replace(/\W+/g,"_")) as Key)??c.name)}</strong><small>${esc(c.detail)}</small></span><span class="row-trail">${badge(covTone[c.status]??"unknown",t(`cs_${c.status}` as Key))}</span></div>`).join("")}</div>`:""}
+${r.body?`<div class="group-title"><h2>${t("reportTitle")}</h2></div><article class="card report-body">${markdown(r.body)}</article>`:""}
+${r.status==="failed"?`<div class="dialog-actions"><button class="button primary" data-diagnose ${diagnosing()||!data?.diagnosisReady?"disabled":""}>${icon("refresh")}${t("retry")}</button></div>`:""}</div>`,true);
+  overlay.querySelector("dialog")?.addEventListener("close",()=>{openReport=null;});
+  overlay.querySelector<HTMLElement>("[data-diagnose]")?.addEventListener("click",()=>void diagnose());
+}
+async function diagnose(){
+  try{const d=await request("/api/reports","POST",{lang});toast(t("diagnoseStarted"));await load();if(overlay.querySelector("dialog[open]"))void showReport(d.report.id);}
+  catch(e){toast((e as Error).message||t("error"));await load();}
+}
 function stepper(name:keyof Settings,value:number,min:number,max:number){return `<span class="stepper"><button type="button" data-step="-1" aria-label="−">−</button><input type="number" name="${name}" min="${min}" max="${max}" value="${value}" required aria-label="${t(name as Key)}"><button type="button" data-step="1" aria-label="+">+</button></span>`;}
 function settingsPage(){
   const s=data!.settings,theme=localStorage.getItem("ops-theme")??"system",choices=SCAN_CHOICES.includes(s.scanMinutes)?SCAN_CHOICES:[...SCAN_CHOICES,s.scanMinutes].sort((a,b)=>a-b);
@@ -185,6 +222,8 @@ function bind(){
   root.querySelectorAll<HTMLElement>("[data-incident]").forEach(el=>el.onclick=()=>showIncident(el.dataset.incident!,el.dataset.host!));
   root.querySelectorAll<HTMLElement>("[data-scan]").forEach(el=>el.onclick=()=>void showScan(el.dataset.scan!,el.dataset.host!));
   root.querySelector("#new-incident")?.addEventListener("click",()=>newIncident());
+  root.querySelectorAll<HTMLElement>("[data-report]").forEach(el=>el.onclick=()=>void showReport(el.dataset.report!));
+  root.querySelectorAll<HTMLElement>("[data-diagnose]").forEach(el=>el.onclick=()=>{el.setAttribute("disabled","");void diagnose();});
   root.querySelector("#new")?.addEventListener("click",()=>newRule());root.querySelector("#coverage-new")?.addEventListener("click",()=>newRule());
   root.querySelector("#scan")?.addEventListener("click",()=>act(async()=>{await request("/api/scan","POST",{});toast(t("scanStarted"));await load();}));
   root.querySelector("#language")?.addEventListener("click",()=>{setLang(lang==="zh"?"en":"zh");render();});

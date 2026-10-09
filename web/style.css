@@ -264,3 +264,22 @@ dialog[open]{animation:sheet-in .28s cubic-bezier(.2,.9,.3,1)}
 
 .source-item .count.soft{color:var(--orange)}
 .tab-badge.soft{background:var(--orange)}
+
+/* Diagnosis reports: the agent's Markdown in a readable column. */
+.report-callout{margin:0 0 6px}
+.report-callout .button{margin-left:auto;white-space:nowrap}
+.sym.busy .icon{animation:spin 1s linear infinite}
+.note.error{background:color-mix(in srgb,var(--red) 12%,var(--card))}
+.note.error .icon{color:var(--red-text)}
+.note.error p{color:var(--secondary);margin-top:2px;overflow-wrap:anywhere}
+.report-body{padding:6px 18px 16px;font-size:14px;line-height:1.6;overflow-wrap:anywhere}
+.report-body h2,.report-body h3,.report-body h4{font-weight:600;margin:18px 0 6px;line-height:1.3}
+.report-body h2{font-size:17px}.report-body h3{font-size:15px}.report-body h4{font-size:14px}
+.report-body p,.report-body ul,.report-body ol,.report-body pre,.report-body blockquote{margin:6px 0}
+.report-body ul,.report-body ol{padding-left:22px}
+.report-body li{margin:3px 0}
+.report-body code{font-family:var(--mono);font-size:12.5px;padding:1px 5px;border-radius:5px;background:var(--fill-2)}
+.report-body pre{padding:10px 12px;border-radius:10px;background:var(--fill-2);overflow-x:auto}
+.report-body pre code{padding:0;background:none;white-space:pre}
+.report-body blockquote{padding-left:12px;border-left:3px solid var(--separator);color:var(--secondary)}
+.report-body hr{border:0;border-top:1px solid var(--separator);margin:14px 0}

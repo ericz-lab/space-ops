@@ -1,8 +1,9 @@
 import { validateRule } from "./rules.ts";
 import type { Engine } from "./engine.ts";
+import type { Diagnosis } from "./diagnose.ts";
 import type { Check, Settings, Snapshot, TaskPolicy } from "./types.ts";
 
-export function api(engine: Engine) {
+export function api(engine: Engine, diagnosis?: Diagnosis) {
   const store = engine.store;
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url), path = url.pathname;
@@ -21,9 +22,17 @@ export function api(engine: Engine) {
       const body = async()=>{const text=await req.text(); if(text.length>32768) throw new Error("Request too large"); return JSON.parse(text);};
       if (path === "/healthz") { const last=store.get<number>("meta","scan"); const ok=!!last && Date.now()-last<engine.leaseMs(); return json({ok,lastScanAt:last?new Date(last).toISOString():null},ok?200:503); }
       if (req.method === "GET" && path === "/api/snapshot") return json(engine.snapshot());
-      if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind='taskPolicy'").all() as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)])),busy:engine.busy(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
+      if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind='taskPolicy'").all() as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)])),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
       if (req.method === "GET" && path === "/api/widget") return json(widget(engine.snapshot()));
       if (req.method === "GET" && path.startsWith("/api/checks/")) { const id=decodeURIComponent(path.slice(12)); return json({ok:true,check:store.get<Check>("check",id),history:store.history(id)}); }
+      if (req.method === "GET" && path === "/api/reports") return json({ok:true,reports:store.reports(100)});
+      if (req.method === "GET" && path.startsWith("/api/reports/")) { const r=store.report(decodeURIComponent(path.slice(13))); return r?json({ok:true,report:r}):json({ok:false,error:"Report not found"},404); }
+      if (req.method === "POST" && path === "/api/reports") {
+        // One diagnosis at a time: a second click answers the running one (409) instead of starting another.
+        if (!diagnosis) return json({ok:false,error:"Diagnosis is unavailable"},503);
+        const b=await body(), {report,started}=diagnosis.start(b.lang==="zh"?"zh":"en",(req.headers.get("cf-access-authenticated-user-email")??"").slice(0,200)||undefined);
+        return json({ok:started,report,...(started?{}:{error:"A diagnosis is already running"})},started?202:409);
+      }
       if (req.method === "POST" && path === "/api/scan") { void engine.scan().catch(()=>{}); return json({ok:true},202); }
       if (req.method === "POST" && path === "/api/rules") { const rule=validateRule(await body()); if(store.rules().length>=100) throw new Error("At most 100 custom rules");store.put("rule",rule.id,rule);void engine.scan().catch(()=>{});return json({ok:true,rule},201); }
       if (path.startsWith("/api/rules/") && req.method === "PUT") { const id=decodeURIComponent(path.slice(11));if(!store.get("rule",id))return json({ok:false,error:"Rule not found"},404);const rule=validateRule(await body(),id);store.put("rule",id,rule);store.db.query("DELETE FROM documents WHERE kind='check' AND id=?").run(id);void engine.scan().catch(()=>{});return json({ok:true,rule}); }

@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { validInstant } from "./rules.ts";
-import { DEFAULT_SETTINGS, type Check, type Incident, type Inspection, type IncidentEvent, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
+import { DEFAULT_SETTINGS, type Check, type Incident, type Inspection, type IncidentEvent, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
 
 export class Store {
   readonly db: Database;
@@ -11,7 +11,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS observations (id INTEGER PRIMARY KEY, check_id TEXT NOT NULL, at INTEGER NOT NULL, verdict TEXT NOT NULL, code TEXT NOT NULL, latency REAL);
       CREATE INDEX IF NOT EXISTS observations_check ON observations(check_id,at);
       CREATE TABLE IF NOT EXISTS scans (at INTEGER PRIMARY KEY, passing INTEGER, failing INTEGER, unknown INTEGER);
-      CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, error TEXT);`);
+      CREATE TABLE IF NOT EXISTS outbox (id TEXT PRIMARY KEY, body TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL, error TEXT);
+      CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, started_at INTEGER NOT NULL, status TEXT NOT NULL, body TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS reports_started ON reports(started_at);`);
     if (!(this.db.query("PRAGMA table_info(scans)").all() as { name: string }[]).some(c => c.name === "transient")) this.db.exec("ALTER TABLE scans ADD COLUMN transient INTEGER NOT NULL DEFAULT 0");
     if (!(this.db.query("PRAGMA table_info(observations)").all() as { name: string }[]).some(c => c.name === "status")) this.db.exec("ALTER TABLE observations ADD COLUMN status TEXT");
   }
@@ -146,6 +148,18 @@ export class Store {
   retainInspections(ids: string[]) {
     const keep = new Set(ids);
     for (const i of this.list<Inspection>("inspection")) if (!keep.has(i.id)) this.db.query("DELETE FROM documents WHERE kind='inspection' AND id=?").run(i.id);
+  }
+  /** Diagnosis reports are kept apart from observations: never pruned by retention, only capped at the latest 200. */
+  putReport(r: Report) {
+    this.db.query("INSERT INTO reports(id,started_at,status,body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,body=excluded.body").run(r.id, Date.parse(r.startedAt), r.status, JSON.stringify(r));
+    this.db.query("DELETE FROM reports WHERE status<>'running' AND id NOT IN (SELECT id FROM reports ORDER BY started_at DESC LIMIT 200)").run();
+  }
+  report(id: string): Report | null { const r = this.db.query("SELECT body FROM reports WHERE id=?").get(id) as { body: string } | null; return r ? JSON.parse(r.body) as Report : null; }
+  reports(limit = 50): ReportItem[] { return (this.db.query("SELECT body FROM reports ORDER BY started_at DESC LIMIT ?").all(limit) as { body: string }[]).map(r => { const { body: _body, ...item } = JSON.parse(r.body) as Report; return item; }); }
+  runningReport(): Report | null { const r = this.db.query("SELECT body FROM reports WHERE status='running' ORDER BY started_at DESC LIMIT 1").get() as { body: string } | null; return r ? JSON.parse(r.body) as Report : null; }
+  /** A run cut by a restart: its model call died with the process, so it failed and may be retried. */
+  interruptReports(now = Date.now()) {
+    for (const r of (this.db.query("SELECT body FROM reports WHERE status='running'").all() as { body: string }[]).map(r => JSON.parse(r.body) as Report)) this.putReport({ ...r, status: "failed", finishedAt: new Date(now).toISOString(), error: "Interrupted: Space Ops restarted while the diagnosis was running" });
   }
   history(id: string) { return (this.db.query("SELECT at,verdict,code,latency FROM observations WHERE check_id=? ORDER BY at DESC LIMIT 60").all(id) as { at: number }[]).map(r=>({ ...r, at: new Date(r.at).toISOString() })); }
   prune(days: number, now = Date.now()) { const before = now - days * 86_400_000; this.db.query("DELETE FROM observations WHERE at<?").run(before); this.db.query("DELETE FROM scans WHERE at<?").run(before); }

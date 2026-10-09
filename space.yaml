@@ -14,8 +14,16 @@ service:
   command: bun src/index.ts
   port: 8998
   health: /healthz
+  env:
+    # Command that prints an app's recent log for a diagnosis: {app} = app name, {lines} = line count.
+    # Machine-specific, so it comes from the workspace .env; empty = logs are reported as not checked.
+    OPS_LOGS_COMMAND: ${OPS_LOGS_COMMAND:-}
 storage:
   database: sqlite
+# The one-click diagnosis (tag `diagnose`) defaults to Codex's advanced tier; the panel may override it.
+model:
+  tags:
+    diagnose: codex/advanced
 widgets:
   - name: status
     title: Operations

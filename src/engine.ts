@@ -8,7 +8,7 @@ export class Engine {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = true;
   private tickAt = 0;
-  constructor(readonly store: Store, readonly config: { api: string; machine: string; dataDir: string; retentionDays: number; appToken?: string; peers?: { name: string; url: string }[] }, private fetcher: typeof fetch = fetch) {}
+  constructor(readonly store: Store, readonly config: { api: string; machine: string; dataDir: string; retentionDays: number; appToken?: string; peers?: { name: string; url: string }[] }, readonly fetcher: typeof fetch = fetch) {}
   /** Scan cadence from Settings, so the operator changes it without a restart. */
   intervalMs() { return this.store.settings().scanMinutes * 60_000; }
   /** How long a scan stays current: four cadences, never under four minutes. */
