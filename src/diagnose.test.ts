@@ -126,7 +126,7 @@ describe("Diagnosis of peers",()=>{
     const r=s.report(report.id)!,prompt=String(seen.find(x=>x.url.endsWith("/api/model/run"))!.body!.prompt);
     expect(r.machines).toEqual(["seoul","david"]);expect(r.targets).toEqual(["seoul","david","seoul/news","david/picker"]);
     expect(r.coverage.filter(c=>c.machine==="david").map(c=>c.name)).toEqual(["Service logs"]);
-    expect(prompt).toContain("# Machine: seoul (the collector running this diagnosis)");expect(prompt).toContain("# Machine: david (peer)");expect(prompt).toContain("upstream 503");
+    expect(prompt).toContain("# Machine: seoul (the collector running this diagnosis)");expect(prompt).toContain("# Machine: david (peer)");expect(prompt).toContain("upstream 503");expect(prompt).toContain("- Service logs: done (Logs of 1 of 1 applications)");expect(prompt).toContain("- Service logs: skipped");
     const only=d.start("en",undefined,"david");await d.settled();
     expect(s.report(only.report.id)!.coverage.every(c=>c.machine==="david")).toBe(true);
   });
