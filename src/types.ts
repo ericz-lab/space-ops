@@ -20,7 +20,8 @@ export type Incident = { id: string; checkId: string; name: string; app: string;
 /** Non-passing observations of one scan: from just after the previous scan to this one. */
 export type ScanRecord = { at: string; previousAt: string | null; checks: { id: string; name: string; app: string; kind: string; status: string; verdict: string; code: string; at: string }[] };
 export type Snapshot = { version: 1; machine: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[] };
-export type PeerView = { name: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null };
+/** `url`: where the snapshot is read; the peer's diagnosis evidence sits next to it. */
+export type PeerView = { name: string; url?: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null };
 /** Operator policy for one local task: success due within `deadlineMinutes` of its start; `errorThreshold` overrides the global one. */
 export type TaskPolicy = { deadlineMinutes?: number; errorThreshold?: number };
 export type Settings = { notifications: boolean; scanMinutes: number; failAfter: number; recoverAfter: number; taskErrorThreshold: number; diskPercent: number; memoryPercent: number };
@@ -35,7 +36,8 @@ export type ReportStatus = "running" | "done" | "failed";
 /** `ok`: no fault found; `issues`: faults found; `incomplete`: the evidence was not enough to say. */
 export type ReportVerdict = "ok" | "issues" | "incomplete";
 /** One evidence source: read in full, read in part, not read (with why), or failed. */
-export type Coverage = { name: string; status: "done" | "partial" | "skipped" | "failed"; detail: string };
-export type Report = { id: string; machine: string; status: ReportStatus; lang: "en" | "zh"; startedAt: string; finishedAt: string | null; by?: string; targets: string[]; coverage: Coverage[]; verdict?: ReportVerdict; summary?: string; body?: string; error?: string; call?: { id?: number; model?: string; runtime?: string; durationMs?: number } };
+export type Coverage = { name: string; status: "done" | "partial" | "skipped" | "failed"; detail: string; machine?: string };
+/** `machine` ran it; `machines` were diagnosed (absent on reports from before peers were covered: the machine itself). */
+export type Report = { id: string; machine: string; machines?: string[]; status: ReportStatus; lang: "en" | "zh"; startedAt: string; finishedAt: string | null; by?: string; targets: string[]; coverage: Coverage[]; verdict?: ReportVerdict; summary?: string; body?: string; error?: string; call?: { id?: number; model?: string; runtime?: string; durationMs?: number } };
 /** A report in a list: everything but the body. */
 export type ReportItem = Omit<Report, "body">;

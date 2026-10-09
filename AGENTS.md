@@ -13,7 +13,7 @@ Read README.md before changing behavior. Motivation and scope: GitHub issue #1.
 - HTTP probes are GET-only, bounded, do not follow redirects, and never forward Space credentials to their targets.
 - Bind loopback. Browser writes require same-origin JSON. Public deployment requires an access policy before registration.
 - Follow ai-space docs/time.md: UTC instants in API, explicit units, browser timezone for display.
-- The diagnosis agent gets evidence in its prompt, never a shell: the model runtime may be on another host. A source it did not read is listed as not checked. It never repairs.
+- The diagnosis agent gets evidence in its prompt, never a shell: the model runtime may be on another host. A source it did not read is listed as not checked. It never repairs. Each collector gathers only its own machine's evidence (`/api/evidence`, nonrecursive like snapshots); the diagnosing machine reads its peers' through the Space peer proxy (60 s limit, so evidence collection stays bounded).
 - Run `bun run check` before every push. Commit messages follow Conventional Commits.
 
 ## Repository map

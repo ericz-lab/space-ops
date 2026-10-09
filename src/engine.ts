@@ -66,10 +66,10 @@ export class Engine {
             if (snap.version !== 1 || !Array.isArray(snap.checks) || !Array.isArray(snap.incidents) || typeof snap.machine !== "string" || !Number.isFinite(Date.parse(snap.generatedAt))) throw new Error("Invalid snapshot");
             const lease=Number.isFinite(snap.staleAfterMs)&&snap.staleAfterMs>=60_000&&snap.staleAfterMs<=14_400_000?snap.staleAfterMs:240_000;
             if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("Peer scan expired or clock differs");
-            this.store.put("peer",p.name,{name:p.name,status:"healthy",snapshot:snap,receivedAt:new Date().toISOString()} satisfies PeerView);
+            this.store.put("peer",p.name,{name:p.name,url:p.url,status:"healthy",snapshot:snap,receivedAt:new Date().toISOString()} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"pass",code:"peer_ok",detail:"Peer collector is reporting fresh observations"});
           } catch {
-            this.store.put("peer",p.name,{name:p.name,status:"unknown",error:"Peer collector is unavailable or its snapshot expired",snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
+            this.store.put("peer",p.name,{name:p.name,url:p.url,status:"unknown",error:"Peer collector is unavailable or its snapshot expired",snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",code:"peer_unavailable",detail:"Peer collector is unavailable or its snapshot expired"});
           }
         });

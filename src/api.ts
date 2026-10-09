@@ -25,12 +25,14 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
       if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind='taskPolicy'").all() as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)])),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
       if (req.method === "GET" && path === "/api/widget") return json(widget(engine.snapshot()));
       if (req.method === "GET" && path.startsWith("/api/checks/")) { const id=decodeURIComponent(path.slice(12)); return json({ok:true,check:store.get<Check>("check",id),history:store.history(id)}); }
+      // This machine only, never its peers: a hub reads it through the Space peer proxy, so evidence does not fan out.
+      if (req.method === "GET" && path === "/api/evidence") { if(!diagnosis)return json({ok:false,error:"Diagnosis is unavailable"},503); return json({ok:true,version:1,...await diagnosis.evidence()}); }
       if (req.method === "GET" && path === "/api/reports") return json({ok:true,reports:store.reports(100)});
       if (req.method === "GET" && path.startsWith("/api/reports/")) { const r=store.report(decodeURIComponent(path.slice(13))); return r?json({ok:true,report:r}):json({ok:false,error:"Report not found"},404); }
       if (req.method === "POST" && path === "/api/reports") {
         // One diagnosis at a time: a second click answers the running one (409) instead of starting another.
         if (!diagnosis) return json({ok:false,error:"Diagnosis is unavailable"},503);
-        const b=await body(), {report,started}=diagnosis.start(b.lang==="zh"?"zh":"en",(req.headers.get("cf-access-authenticated-user-email")??"").slice(0,200)||undefined);
+        const b=await body(), {report,started}=diagnosis.start(b.lang==="zh"?"zh":"en",(req.headers.get("cf-access-authenticated-user-email")??"").slice(0,200)||undefined,typeof b.machine==="string"?b.machine:undefined);
         return json({ok:started,report,...(started?{}:{error:"A diagnosis is already running"})},started?202:409);
       }
       if (req.method === "POST" && path === "/api/scan") { void engine.scan().catch(()=>{}); return json({ok:true},202); }

@@ -2,9 +2,9 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { Store } from "./store.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
-import { Diagnosis, collectEvidence, parseAnswer } from "./diagnose.ts";
+import { Diagnosis, collectEvidence, parseAnswer, peerEvidence } from "./diagnose.ts";
 import { markdown } from "../web/markdown.ts";
-import type { Report, Sample } from "./types.ts";
+import type { PeerView, Report, Sample, Snapshot } from "./types.ts";
 
 const stores:Store[]=[];
 afterEach(()=>{for(const s of stores.splice(0))s.db.close();});
@@ -17,6 +17,7 @@ function space(answer:(body:Record<string,unknown>)=>{status?:number;body:unknow
     const url=String(input),body=init?.body?JSON.parse(String(init.body)):undefined;seen.push({url,body,auth:new Headers(init?.headers).get("authorization")??undefined});
     if(url.includes("/runs"))return Response.json({runs:[{status:"error",startedAt:Date.now()-60_000,endedAt:Date.now()-50_000,error:"ECONNREFUSED upstream"}]});
     if(url.includes("/api/model/calls"))return Response.json({calls:[{app:"news",tag:"digest",model:"m",status:"error",error:"rate limited",startedAt:new Date().toISOString()},{app:"news",tag:"digest",model:"m",status:"ok",startedAt:new Date().toISOString()}]});
+    if(url.endsWith("/proxy/api/evidence"))return Response.json({ok:true,version:1,machine:"david",generatedAt:new Date().toISOString(),text:"## Checks not healthy (1)\n- [failing] picker / sync: upstream 503",coverage:[{name:"Service logs",status:"done",detail:"Logs of 1 of 1 applications"}],targets:["david/picker"]});
     if(url.endsWith("/api/model/run")){const a=answer(body);return Response.json(a.body,{status:a.status??200});}
     return Response.json({});
   }) as typeof fetch;
@@ -31,7 +32,7 @@ describe("Diagnosis",()=>{
     expect(without.text).toContain("ECONNREFUSED upstream");
     expect(without.text).toContain("news/digest (m): 1 failed");
     expect(without.text).toContain("[failing] news / fetch");
-    expect(without.targets).toEqual(["seoul","news"]);
+    expect(without.targets).toEqual(["seoul/news"]);
     expect(without.coverage.find(c=>c.name==="Service logs")).toMatchObject({status:"skipped"});
     expect(without.coverage.find(c=>c.name==="Failed task runs")).toMatchObject({status:"done"});
     const cmds:string[]=[];
@@ -96,6 +97,45 @@ describe("Diagnosis",()=>{
     expect((await handler(new Request("http://ops.test/api/reports/none"))).status).toBe(404);
     const dash=await (await handler(new Request("http://ops.test/api/dashboard"))).json();
     expect(dash.diagnosisReady).toBe(true);expect(dash.reports).toHaveLength(1);
+  });
+});
+
+const peerSnap=(machine:string):Snapshot=>({version:1,machine,generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),staleAfterMs:240000,checks:[{id:"task:x",name:"picker / sync",app:"picker",kind:"task",coverage:"execution",verdict:"fail",code:"task_errors",detail:"4 consecutive failed executions",status:"failing",failures:4,successes:0,observedAt:new Date().toISOString(),lastPassedAt:null,mutedUntil:null,enabled:true}],incidents:[],history:[]});
+const peer=(over:Partial<PeerView>={}):PeerView=>({name:"david",url:"http://space.test/api/peers/david/apps/space-ops/proxy/api/snapshot",status:"healthy",snapshot:peerSnap("david"),receivedAt:new Date().toISOString(),...over});
+
+describe("Diagnosis of peers",()=>{
+  test("a peer's own evidence is read through the peer proxy next to its snapshot",async()=>{
+    const seen:Seen[]=[],ev=await peerEvidence(engine(store(),space(()=>({body:{}}),seen)),peer());
+    expect(seen[0]!.url).toBe("http://space.test/api/peers/david/apps/space-ops/proxy/api/evidence");
+    expect(ev.text).toContain("upstream 503");expect(ev.targets).toEqual(["david/picker"]);
+  });
+  test("without its evidence a peer falls back to its snapshot and says what was not read",async()=>{
+    const failing=(async()=>new Response("no",{status:404})) as unknown as typeof fetch;
+    const ev=await peerEvidence(engine(store(),failing),peer());
+    expect(ev.text).toContain("[failing] picker / sync");
+    expect(ev.coverage.find(c=>c.name==="Peer evidence")).toMatchObject({status:"partial"});
+    expect(ev.coverage.find(c=>c.name==="Peer evidence")!.detail).toContain("HTTP 404");
+    const none=await peerEvidence(engine(store(),failing),peer({snapshot:null,status:"unknown",error:"Peer collector is unavailable"}));
+    expect(none.coverage[0]).toMatchObject({name:"Peer evidence",status:"failed"});
+  });
+  test("all machines by default, one when named; every machine's evidence goes to the model",async()=>{
+    const s=store();s.observe(task);s.finishScan();s.put("peer","david",peer());const seen:Seen[]=[];
+    const d=new Diagnosis(engine(s,space(()=>({body:{ok:true,text:"VERDICT: issues\nSUMMARY: x\nbody"}}),seen)));
+    expect(d.scope()).toEqual(["seoul","david"]);expect(d.scope("david")).toEqual(["david"]);expect(()=>d.scope("nowhere")).toThrow("Unknown machine");
+    const {report}=d.start("en");await d.settled();
+    const r=s.report(report.id)!,prompt=String(seen.find(x=>x.url.endsWith("/api/model/run"))!.body!.prompt);
+    expect(r.machines).toEqual(["seoul","david"]);expect(r.targets).toEqual(["seoul","david","seoul/news","david/picker"]);
+    expect(r.coverage.filter(c=>c.machine==="david").map(c=>c.name)).toEqual(["Service logs"]);
+    expect(prompt).toContain("# Machine: seoul (the collector running this diagnosis)");expect(prompt).toContain("# Machine: david (peer)");expect(prompt).toContain("upstream 503");
+    const only=d.start("en",undefined,"david");await d.settled();
+    expect(s.report(only.report.id)!.coverage.every(c=>c.machine==="david")).toBe(true);
+  });
+  test("GET /api/evidence answers this machine only and reuses a fresh collection",async()=>{
+    const s=store();s.observe(task);s.finishScan();s.put("peer","david",peer());const seen:Seen[]=[];
+    const e=engine(s,space(()=>({body:{}}),seen)),handler=api(e,new Diagnosis(e));
+    const a=await (await handler(new Request("http://ops.test/api/evidence"))).json();
+    expect(a).toMatchObject({ok:true,version:1,machine:"seoul"});expect(a.text).not.toContain("david");
+    const reads=seen.length;await handler(new Request("http://ops.test/api/evidence"));expect(seen.length).toBe(reads);
   });
 });
 
