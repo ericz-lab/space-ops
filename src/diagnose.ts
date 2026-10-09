@@ -32,6 +32,9 @@ export async function collectEvidence(engine: Engine, opts: DiagnoseOptions = {}
 
   const row = (c: Check) => `- [${c.status}] ${c.name} (id ${c.id}, app ${c.app}, kind ${c.kind}) code=${c.code}${c.value !== undefined ? ` value=${c.value}` : ""}${c.threshold !== undefined ? ` threshold=${c.threshold}` : ""} failures=${c.failures} observed=${c.observedAt}${c.failedAt ? ` failingSince=${c.failedAt}` : ""}${c.lastPassedAt ? ` lastPass=${c.lastPassedAt}` : " lastPass=never"}\n  ${clip(c.detail, 400)}`;
   parts.push(`## Checks not healthy (${problems.length})\n${problems.slice(0, 60).map(row).join("\n") || "None."}${problems.length > 60 ? `\n…and ${problems.length - 60} more` : ""}`);
+  // A task running within its deadline counts as unknown in the totals; name it so the count is explained.
+  const running = checks.filter(c => c.code === "task_running");
+  if (running.length) parts.push(`## Tasks running now, within their deadline (counted as unknown, not a fault)\n${running.slice(0, 20).map(c => `- ${c.name} (${c.app})`).join("\n")}`);
   const paused = checks.filter(c => c.status === "paused");
   if (paused.length) parts.push(`## Paused checks (not observed)\n${paused.slice(0, 20).map(c => `- ${c.name} (${c.app})`).join("\n")}`);
 

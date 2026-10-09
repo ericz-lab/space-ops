@@ -45,6 +45,8 @@ describe("Diagnosis",()=>{
     const ev=await collectEvidence(engine(s,space(()=>({body:{}}))));
     expect(ev.coverage.find(c=>c.name==="Service logs")).toMatchObject({status:"done"});
     expect(ev.text).toContain("## Checks not healthy (0)");
+    s.observe({...task,id:"task:t2",name:"news / digest",verdict:"unknown",code:"task_running"});
+    expect((await collectEvidence(engine(s,space(()=>({body:{}}))))).text).toContain("Tasks running now, within their deadline (counted as unknown, not a fault)\n- news / digest (news)");
   });
   test("parses the verdict and summary lines and keeps the rest as the report",()=>{
     expect(parseAnswer("VERDICT: issues\nSUMMARY: news fetch fails\n\n## 结论\nBroken")).toEqual({verdict:"issues",summary:"news fetch fails",body:"## 结论\nBroken"});
