@@ -26,7 +26,7 @@ model:
     diagnose: codex/advanced
 widgets:
   - name: status
-    title: Operations
+    title: Space Ops · Status
     kind: items
     source: /api/widget
     link: /
