@@ -31,7 +31,10 @@ export function validateRule(raw: unknown, id: string = crypto.randomUUID()): Ru
   const timezone = typeof r.timezone === "string" ? r.timezone.trim() : "";
   if (timezone && !validZone(timezone)) throw new Error("Use an IANA timezone such as Asia/Shanghai");
   if (assertions.some((a: Assertion) => a.operator === "dailyBy") && !timezone) throw new Error("dailyBy needs the rule's timezone");
-  return { id, kind: "http", ...(timezone ? { timezone } : {}), ...(recoveryTaskId ? { recoveryTaskId } : {}), ...(evidenceTimestampPath ? { evidenceTimestampPath } : {}), name, url: url.href, app: String(r.app ?? "custom").slice(0, 80), enabled: r.enabled !== false,
+  const weekdays = r.weekdays;
+  if (weekdays !== undefined && (!Array.isArray(weekdays) || !weekdays.length || weekdays.length > 7 || weekdays.some(d => !Number.isInteger(d) || d < 0 || d > 6) || new Set(weekdays).size !== weekdays.length)) throw new Error("weekdays needs distinct integers from 0 (Sunday) to 6 (Saturday)");
+  if (weekdays !== undefined && !timezone) throw new Error("weekdays needs the rule's timezone");
+  return { id, kind: "http", ...(weekdays !== undefined ? { weekdays: weekdays as number[] } : {}), ...(timezone ? { timezone } : {}), ...(recoveryTaskId ? { recoveryTaskId } : {}), ...(evidenceTimestampPath ? { evidenceTimestampPath } : {}), name, url: url.href, app: String(r.app ?? "custom").slice(0, 80), enabled: r.enabled !== false,
     intervalMs: integer(r.intervalMs, 300_000, 15_000, 86_400_000, "intervalMs"), timeoutMs: integer(r.timeoutMs, 5000, 500, 30_000, "timeoutMs"),
     failAfter: integer(r.failAfter, 3, 1, 20, "failAfter"), recoverAfter: integer(r.recoverAfter, 2, 1, 20, "recoverAfter"),
     expectedStatus: integer(r.expectedStatus, 200, 200, 599, "expectedStatus"), severity: r.severity === "critical" ? "critical" : "warning", assertions: assertions as Assertion[] };
@@ -51,14 +54,20 @@ export function localParts(at: number, zone: string) {
   const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(at).map(x => [x.type, x.value]));
   return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}` };
 }
-/** The local date a `dailyBy` deadline currently requires: today once the deadline has passed, otherwise yesterday. */
-export function requiredDate(now: number, deadline: string, zone: string) {
-  const { date, time } = localParts(now, zone);
-  if (time >= deadline) return date;
-  const [y, m, d] = date.split("-").map(Number);
-  return new Date(Date.UTC(y!, m! - 1, d! - 1)).toISOString().slice(0, 10);
+/** Calendar weekday, independent of the process timezone. */
+export function weekday(date: string) { return new Date(`${date}T00:00:00Z`).getUTCDay(); }
+export function ruleActive(rule: Rule, now: number) {
+  return !rule.weekdays || rule.weekdays.includes(weekday(localParts(now, rule.timezone!).date));
 }
-export function assertionsResult(data: unknown, assertions: Assertion[], now: number, timezone = "UTC"): Pick<Sample, "verdict" | "code" | "detail"> {
+/** Latest active calendar date whose deadline has passed. */
+export function requiredDate(now: number, deadline: string, zone: string, weekdays?: number[]) {
+  const { date, time } = localParts(now, zone);
+  const day = new Date(`${date}T00:00:00Z`);
+  if (time < deadline) day.setUTCDate(day.getUTCDate() - 1);
+  while (weekdays && !weekdays.includes(day.getUTCDay())) day.setUTCDate(day.getUTCDate() - 1);
+  return day.toISOString().slice(0, 10);
+}
+export function assertionsResult(data: unknown, assertions: Assertion[], now: number, timezone = "UTC", weekdays?: number[]): Pick<Sample, "verdict" | "code" | "detail"> {
   for (const a of assertions) {
     const actual = field(data, a.path);
     if (actual === undefined || actual === null) return { verdict: a.operator === "exists" ? "fail" : "unknown", code: "missing_field", detail: `Missing field: ${a.path}` };
@@ -78,7 +87,7 @@ export function assertionsResult(data: unknown, assertions: Assertion[], now: nu
     if (a.operator === "dailyBy") {
       if (!validInstant(actual)) return { verdict: "unknown", code: "invalid_timestamp", detail: `${a.path}: expected an ISO timestamp with timezone` };
       if (Date.parse(actual) - now > 60_000) return { verdict: "unknown", code: "clock_skew", detail: `${a.path}: timestamp is in the future` };
-      const due = requiredDate(now, String(a.value), timezone), got = localParts(Date.parse(actual), timezone).date;
+      const due = requiredDate(now, String(a.value), timezone, weekdays), got = localParts(Date.parse(actual), timezone).date;
       if (got < due) return { verdict: "fail", code: "daily_deadline_missed", detail: `${a.path}: latest ${got} (${timezone}); ${due} expected by ${a.value}` };
       continue;
     }

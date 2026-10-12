@@ -460,3 +460,44 @@ describe("Widget",()=>{
     expect(w.blocks.at(-1)).toMatchObject({type:"status",label:"example",value:"API",tone:"warning"});
   });
 });
+
+describe("HTTP rule weekdays",()=>{
+  const weekdays=[2,3,4,5,6];
+  const raw={name:"Daily",url:"http://example.test",timezone:"Asia/Shanghai",weekdays,failAfter:1,recoverAfter:1,assertions:[{path:"$.finishedAt",operator:"dailyBy",value:"15:00"}]};
+  test("validates weekdays and requires their timezone",()=>{
+    for(const value of [[],[7],[-1],[1.5],[1,1],["2"],null,"2,3"]) expect(()=>validateRule({...raw,weekdays:value})).toThrow();
+    expect(()=>validateRule({...raw,timezone:undefined})).toThrow();
+    expect(validateRule(raw).weekdays).toEqual(weekdays);
+    expect(validateRule({...raw,weekdays:undefined}).weekdays).toBeUndefined();
+  });
+  test("skips Sunday and Monday without HTTP requests using Shanghai midnight",async()=>{
+    const rule=validateRule(raw);let requests=0;
+    const fetcher=mockFetch(()=>{requests++;return {finishedAt:"2026-10-10T06:00:00Z"};});
+    for(const instant of ["2026-10-10T16:00:00Z","2026-10-11T07:00:00Z","2026-10-12T15:59:59Z"]){
+      expect(await httpProbe(rule,fetcher,Date.parse(instant))).toMatchObject({verdict:"unknown",code:"rule_offday"});
+    }
+    expect(requests).toBe(0);
+    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-10T15:59:59Z"))).verdict).toBe("pass");
+    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-12T16:00:00Z"))).verdict).toBe("pass");
+    expect(requests).toBe(2);
+  });
+  test("Tuesday requires Saturday before 15:00 and Tuesday at the deadline",async()=>{
+    const rule=validateRule(raw),fetcher=mockFetch(()=>({finishedAt:"2026-10-10T06:00:00Z"}));
+    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-13T06:59:59Z"))).verdict).toBe("pass");
+    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-13T07:00:00Z"))).code).toBe("daily_deadline_missed");
+    expect((await httpProbe(rule,mockFetch(()=>({finishedAt:"2026-10-09T06:00:00Z"})),Date.parse("2026-10-13T06:59:59Z"))).verdict).toBe("fail");
+    expect((await httpProbe(rule,mockFetch(()=>({finishedAt:"2026-10-13T06:00:00Z"})),Date.parse("2026-10-13T07:00:00Z"))).verdict).toBe("pass");
+    // Calendar traversal across a year boundary; Friday is the only active day.
+    expect(assertionsResult({finishedAt:"2026-12-25T06:00:00Z"},rule.assertions,Date.parse("2027-01-01T06:59:59Z"),rule.timezone,[5]).verdict).toBe("pass");
+  });
+  test("off days do not claim health or resolve an existing incident",async()=>{
+    const s=store(),rule=validateRule(raw),sat=Date.parse("2026-10-10T07:00:00Z"),sun=Date.parse("2026-10-11T07:00:00Z");
+    const failed=await httpProbe(rule,mockFetch(()=>({finishedAt:"2026-10-09T06:00:00Z"})),sat);
+    s.observe(failed,sat);const incident=s.activeIncident(rule.id)!;
+    const skipped=await httpProbe(rule,mockFetch(()=>{throw new Error("must not fetch");}),sun);
+    expect(s.observe(skipped,sun)).toMatchObject({status:"off",verdict:"unknown",successes:0,lastPassedAt:null,enabled:true});
+    expect(s.activeIncident(rule.id)?.id).toBe(incident.id);
+    expect(s.snapshot("test",sun).checks.find(c=>c.id===rule.id)?.status).toBe("off");
+    const fresh=store();fresh.observe(skipped,sun);expect(fresh.activeIncident(rule.id)).toBeUndefined();
+  });
+});

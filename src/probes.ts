@@ -1,6 +1,6 @@
 import { freemem, totalmem, loadavg, cpus } from "node:os";
 import { statfs, readFile } from "node:fs/promises";
-import { assertionsResult, field, validInstant } from "./rules.ts";
+import { assertionsResult, field, validInstant, ruleActive } from "./rules.ts";
 import type { Rule, Sample, Settings, Check, TaskPolicy } from "./types.ts";
 
 export async function readJson(url: string, timeoutMs = 8000, fetcher: typeof fetch = fetch): Promise<any> {
@@ -18,6 +18,7 @@ export async function limitedText(response: Response, limit = 2_000_000): Promis
 }
 export async function httpProbe(rule: Rule, fetcher: typeof fetch = fetch, now = Date.now()): Promise<Sample> {
   const base: Sample = { id: rule.id, name: rule.name, app: rule.app, kind: "http", verdict: "unknown", code: "unknown", detail: "", coverage: rule.assertions.length ? "assertion" : "availability", failAfter: rule.failAfter, recoverAfter: rule.recoverAfter, severity: rule.severity, staleAfterMs: rule.intervalMs * 3 + rule.timeoutMs };
+  if (!ruleActive(rule, now)) return { ...base, code: "rule_offday", detail: `No check scheduled today (${rule.timezone})` };
   const started = performance.now();
   try {
     const response = await fetcher(rule.url, { signal: AbortSignal.timeout(rule.timeoutMs), redirect: "error", headers: { accept: "application/json" } });
@@ -31,7 +32,7 @@ export async function httpProbe(rule: Rule, fetcher: typeof fetch = fetch, now =
       if (!validInstant(value) || Date.parse(value) > now + 60_000) return { ...base, verdict: "unknown", code: "invalid_recovery_timestamp", detail: "Result timestamp is absent, invalid or in the future" };
       evidenceAt = new Date(value).toISOString();
     }
-    return { ...base, evidenceAt, ...assertionsResult(data, rule.assertions, now, rule.timezone), latencyMs: Math.round(performance.now()-started) };
+    return { ...base, evidenceAt, ...assertionsResult(data, rule.assertions, now, rule.timezone, rule.weekdays), latencyMs: Math.round(performance.now()-started) };
   } catch (e) { return { ...base, verdict: "fail", code: "http_unreachable", detail: e instanceof Error && e.name === "TimeoutError" ? "Probe exceeded its timeout" : "Connection failed, redirected, or timed out", latencyMs: Math.round(performance.now()-started) }; }
 }
 export type Task = { id: string; app: string; name: string; enabled: boolean; orphaned: boolean; timeoutMs: number; state: { runningAt?: string; nextRunAt?: string; lastRunAt?: string; lastDurationMs?: number; lastStatus?: string; consecutiveErrors?: number; pending?: { dueAt: string; deadlineAt?: string } } };

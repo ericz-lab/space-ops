@@ -1,5 +1,5 @@
 /** `transient`: a failure below the incident threshold (one-off error); never healthy, never an incident. */
-export type Status = "healthy" | "transient" | "failing" | "recovering" | "unknown" | "paused";
+export type Status = "healthy" | "transient" | "failing" | "recovering" | "unknown" | "paused" | "off";
 export type Verdict = "pass" | "fail" | "unknown";
 /** `today` is for declared app checks: a timestamp whose local date is today in the check's timezone. */
 export type Operator = "exists" | "eq" | "lt" | "gt" | "ageLessThan" | "dailyBy" | "today";
@@ -10,6 +10,8 @@ export type Rule = {
   recoveryTaskId?: string; evidenceTimestampPath?: string;
   /** IANA zone of `dailyBy` deadlines. */
   timezone?: string;
+  /** Active weekdays in timezone, 0 = Sunday. Omitted means every day. */
+  weekdays?: number[];
   expectedStatus: number; assertions: Assertion[]; severity: "warning" | "critical";
 };
 export type Sample = { id: string; name: string; app: string; kind: string; verdict: Verdict; code: string; detail: string; value?: number | string; threshold?: number | string; latencyMs?: number; evidenceAt?: string; coverage: "availability" | "execution" | "assertion" | "host"; failAfter?: number; recoverAfter?: number; severity?: "warning" | "critical"; staleAfterMs?: number; transient?: boolean };
