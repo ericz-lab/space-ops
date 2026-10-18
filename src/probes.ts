@@ -3,6 +3,22 @@ import { statfs, readFile } from "node:fs/promises";
 import { assertionsResult, field, validInstant, ruleActive } from "./rules.ts";
 import type { Rule, Sample, Settings, Check, TaskPolicy } from "./types.ts";
 
+/**
+ * Adds the app's SPACE_APP_TOKEN to requests for Space's own API, and only to those: a Space that
+ * signs its owner in itself (SPACE_AUTH=builtin) refuses an app's reads without it, and an app's
+ * declared check URL on another port must never see the token.
+ */
+export function withSpaceToken(fetcher: typeof fetch, api: string, token?: string): typeof fetch {
+  if (!token) return fetcher;
+  const base = api.replace(/\/+$/, "") + "/";
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (!url.startsWith(base)) return fetcher(input, init);
+    const headers = new Headers(init?.headers);
+    if (!headers.has("authorization")) headers.set("authorization", `Bearer ${token}`);
+    return fetcher(input, { ...init, headers });
+  }) as typeof fetch;
+}
 export async function readJson(url: string, timeoutMs = 8000, fetcher: typeof fetch = fetch): Promise<any> {
   const r = await fetcher(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
   if (!r.ok) { await r.body?.cancel(); throw new Error(`HTTP ${r.status}`); }

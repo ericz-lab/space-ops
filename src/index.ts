@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import page from "../web/index.html";
 import { Store } from "./store.ts";
 import { Engine } from "./engine.ts";
+import { withSpaceToken } from "./probes.ts";
 import { api } from "./api.ts";
 import { Diagnosis } from "./diagnose.ts";
 
@@ -17,7 +18,8 @@ if(process.env.OPS_INTERVAL_MS)console.warn("[ops] OPS_INTERVAL_MS is ignored; s
 if(!Number.isInteger(retentionDays)||retentionDays<1||retentionDays>365)throw new Error("OPS_RETENTION_DAYS must be 1–365");
 const peers=JSON.parse(process.env.OPS_PEERS??"[]") as {name:string;url:string}[];
 if(!Array.isArray(peers)||peers.some(p=>typeof p.name!=="string"||!/^https?:\/\//.test(p.url)))throw new Error("Invalid OPS_PEERS");
-const engine=new Engine(store,{api:(process.env.SPACE_API_URL??"http://127.0.0.1:8700").replace(/\/$/,""),machine:process.env.SPACE_NAME||hostname(),dataDir:dir,retentionDays,appToken:process.env.SPACE_APP_TOKEN,peers});
+const spaceApi=(process.env.SPACE_API_URL??"http://127.0.0.1:8700").replace(/\/$/,"");
+const engine=new Engine(store,{api:spaceApi,machine:process.env.SPACE_NAME||hostname(),dataDir:dir,retentionDays,appToken:process.env.SPACE_APP_TOKEN,peers},withSpaceToken(fetch,spaceApi,process.env.SPACE_APP_TOKEN));
 store.interruptReports();
 const diagnosis=new Diagnosis(engine,{logsCommand:process.env.OPS_LOGS_COMMAND?.trim()||undefined});
 const handler=api(engine,diagnosis);

@@ -501,3 +501,13 @@ describe("HTTP rule weekdays",()=>{
     const fresh=store();fresh.observe(skipped,sun);expect(fresh.activeIncident(rule.id)).toBeUndefined();
   });
 });
+
+import { withSpaceToken } from "./probes.ts";
+test("the app token goes to Space's own API only", async () => {
+  const seen: [string, string | null][] = [];
+  const f = withSpaceToken((async (input: RequestInfo | URL, init?: RequestInit) => { seen.push([String(input), new Headers(init?.headers).get("authorization")]); return new Response("{}"); }) as typeof fetch, "http://127.0.0.1:8700", "app-t");
+  await f("http://127.0.0.1:8700/api/tasks");
+  await f("http://127.0.0.1:8701/api/checks/x");
+  await f("http://127.0.0.1:87000/api/x");
+  expect(seen).toEqual([["http://127.0.0.1:8700/api/tasks", "Bearer app-t"], ["http://127.0.0.1:8701/api/checks/x", null], ["http://127.0.0.1:87000/api/x", null]]);
+});
