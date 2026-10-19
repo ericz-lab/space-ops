@@ -1,4 +1,4 @@
-import { ruleActive } from "./rules.ts";
+import { ruleActive, pendingDeadline } from "./rules.ts";
 import { Store } from "./store.ts";
 import { declared, inspect } from "./inspections.ts";
 import { declaredNoop, hostSamples, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
@@ -87,7 +87,8 @@ export class Engine {
         const control = this.store.get<{enabled?:boolean}>("control",rule.id);
         if (!rule.enabled || control?.enabled === false) return;
         const last = this.store.get<Check>("check",rule.id);
-        if (last && now-Date.parse(last.observedAt)<rule.intervalMs && last.status !== "unknown" && (last.code !== "rule_offday") === ruleActive(rule, now)) return;
+        const waiting = ruleActive(rule, now) ? (pendingDeadline(rule.assertions, now, rule.timezone) ? "rule_before_deadline" : undefined) : "rule_offday";
+        if (last && now-Date.parse(last.observedAt)<rule.intervalMs && last.status !== "unknown" && (["rule_offday", "rule_before_deadline"].includes(last.code) ? last.code : undefined) === waiting) return;
         // A rule shorter than the scan cadence runs once per scan, so it expires on the cadence.
         observe({ ...await httpProbe(rule,this.fetcher,now), staleAfterMs: Math.max(rule.intervalMs,cadence)*3+rule.timeoutMs });
       })

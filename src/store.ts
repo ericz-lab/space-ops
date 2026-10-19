@@ -34,7 +34,7 @@ export class Store {
       const incident = this.activeIncident(sample.id);
       let status: Check["status"] = sample.verdict === "unknown" ? (sample.transient && !incident ? "transient" : "unknown") : sample.verdict === "fail" ? (incident || failures >= (sample.failAfter ?? settings.failAfter) ? "failing" : "transient") : (incident && successes < (sample.recoverAfter ?? settings.recoverAfter) ? "recovering" : "healthy");
       const control = this.get<{ enabled?: boolean; mutedUntil?: string | null }>("control", sample.id);
-      if (sample.verdict === "unknown" && sample.code === "rule_offday") status = "off";
+      if (sample.verdict === "unknown" && ["rule_offday", "rule_before_deadline"].includes(sample.code)) status = "off";
       if (control?.enabled === false) status = "paused";
       // When the current failure episode began; a task reports the end of its failed execution instead.
       const failed = sample.verdict === "fail" || status === "transient", wasFailed = prev?.verdict === "fail" || prev?.status === "transient";

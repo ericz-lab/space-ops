@@ -59,15 +59,14 @@ export function weekday(date: string) { return new Date(`${date}T00:00:00Z`).get
 export function ruleActive(rule: Rule, now: number) {
   return !rule.weekdays || rule.weekdays.includes(weekday(localParts(now, rule.timezone!).date));
 }
-/** Latest active calendar date whose deadline has passed. */
-export function requiredDate(now: number, deadline: string, zone: string, weekdays?: number[]) {
-  const { date, time } = localParts(now, zone);
-  const day = new Date(`${date}T00:00:00Z`);
-  if (time < deadline) day.setUTCDate(day.getUTCDate() - 1);
-  while (weekdays && !weekdays.includes(day.getUTCDay())) day.setUTCDate(day.getUTCDate() - 1);
-  return day.toISOString().slice(0, 10);
+/** Daily rules wait for today's deadline; they never carry yesterday's requirement forward. */
+export function pendingDeadline(assertions: Assertion[], now: number, zone = "UTC"): string | undefined {
+  const time = localParts(now, zone).time;
+  return assertions.filter(a => a.operator === "dailyBy").map(a => String(a.value)).sort().find(deadline => time < deadline);
 }
 export function assertionsResult(data: unknown, assertions: Assertion[], now: number, timezone = "UTC", weekdays?: number[]): Pick<Sample, "verdict" | "code" | "detail"> {
+  const pending = pendingDeadline(assertions, now, timezone);
+  if (pending) return { verdict: "unknown", code: "rule_before_deadline", detail: `Waiting until ${pending} today (${timezone})` };
   for (const a of assertions) {
     const actual = field(data, a.path);
     if (actual === undefined || actual === null) return { verdict: a.operator === "exists" ? "fail" : "unknown", code: "missing_field", detail: `Missing field: ${a.path}` };
@@ -87,7 +86,7 @@ export function assertionsResult(data: unknown, assertions: Assertion[], now: nu
     if (a.operator === "dailyBy") {
       if (!validInstant(actual)) return { verdict: "unknown", code: "invalid_timestamp", detail: `${a.path}: expected an ISO timestamp with timezone` };
       if (Date.parse(actual) - now > 60_000) return { verdict: "unknown", code: "clock_skew", detail: `${a.path}: timestamp is in the future` };
-      const due = requiredDate(now, String(a.value), timezone, weekdays), got = localParts(Date.parse(actual), timezone).date;
+      const due = localParts(now, timezone).date, got = localParts(Date.parse(actual), timezone).date;
       if (got < due) return { verdict: "fail", code: "daily_deadline_missed", detail: `${a.path}: latest ${got} (${timezone}); ${due} expected by ${a.value}` };
       continue;
     }

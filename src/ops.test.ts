@@ -269,12 +269,12 @@ describe("Daily deadlines",()=>{
   const a=[{path:"$.latestPublishedAt",operator:"dailyBy" as const,value:"15:00"}],zone="Asia/Shanghai";
   // 2026-10-02 14:59 and 15:01 in Shanghai.
   const before=Date.parse("2026-10-02T06:59:00Z"),after=Date.parse("2026-10-02T07:01:00Z");
-  test("requires today's date once the local deadline has passed, yesterday's before",()=>{
+  test("requires today's date at the deadline and waits beforehand",()=>{
     const yesterday={latestPublishedAt:"2026-10-01T05:02:51Z"},today={latestPublishedAt:"2026-10-01T16:30:00Z"};
-    expect(assertionsResult(yesterday,a,before,zone).verdict).toBe("pass");
+    expect(assertionsResult(yesterday,a,before,zone).verdict).toBe("unknown");
     expect(assertionsResult(yesterday,a,after,zone)).toMatchObject({verdict:"fail",code:"daily_deadline_missed"});
     expect(assertionsResult(today,a,after,zone).verdict).toBe("pass");
-    expect(assertionsResult({latestPublishedAt:"2026-09-30T10:00:00Z"},a,before,zone).verdict).toBe("fail");
+    expect(assertionsResult({latestPublishedAt:"2026-09-30T10:00:00Z"},a,before,zone).verdict).toBe("unknown");
     expect(assertionsResult({latestPublishedAt:null},a,after,zone).verdict).toBe("unknown");
     expect(assertionsResult({latestPublishedAt:"2026-10-02 05:00:00"},a,after,zone).verdict).toBe("unknown");
   });
@@ -287,7 +287,7 @@ describe("Daily deadlines",()=>{
   test("a probe evaluates the deadline in the rule's zone",async()=>{
     const rule=validateRule({name:"Daily",url:"http://example.test",timezone:zone,failAfter:1,assertions:a});
     expect((await httpProbe(rule,mockFetch(()=>({latestPublishedAt:"2026-10-01T05:02:51Z"})),after)).verdict).toBe("fail");
-    expect((await httpProbe({...rule,timezone:"America/New_York"},mockFetch(()=>({latestPublishedAt:"2026-10-01T05:02:51Z"})),after)).verdict).toBe("pass");
+    expect((await httpProbe({...rule,timezone:"America/New_York"},mockFetch(()=>({latestPublishedAt:"2026-10-01T05:02:51Z"})),after)).code).toBe("rule_before_deadline");
   });
 });
 
@@ -478,17 +478,17 @@ describe("HTTP rule weekdays",()=>{
     }
     expect(requests).toBe(0);
     expect((await httpProbe(rule,fetcher,Date.parse("2026-10-10T15:59:59Z"))).verdict).toBe("pass");
-    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-12T16:00:00Z"))).verdict).toBe("pass");
-    expect(requests).toBe(2);
+    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-12T16:00:00Z"))).code).toBe("rule_before_deadline");
+    expect(requests).toBe(1);
   });
-  test("Tuesday requires Saturday before 15:00 and Tuesday at the deadline",async()=>{
+  test("Tuesday waits before 15:00 and requires Tuesday at the deadline",async()=>{
     const rule=validateRule(raw),fetcher=mockFetch(()=>({finishedAt:"2026-10-10T06:00:00Z"}));
-    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-13T06:59:59Z"))).verdict).toBe("pass");
+    expect((await httpProbe(rule,fetcher,Date.parse("2026-10-13T06:59:59Z"))).code).toBe("rule_before_deadline");
     expect((await httpProbe(rule,fetcher,Date.parse("2026-10-13T07:00:00Z"))).code).toBe("daily_deadline_missed");
-    expect((await httpProbe(rule,mockFetch(()=>({finishedAt:"2026-10-09T06:00:00Z"})),Date.parse("2026-10-13T06:59:59Z"))).verdict).toBe("fail");
+    expect((await httpProbe(rule,mockFetch(()=>({finishedAt:"2026-10-09T06:00:00Z"})),Date.parse("2026-10-13T06:59:59Z"))).code).toBe("rule_before_deadline");
     expect((await httpProbe(rule,mockFetch(()=>({finishedAt:"2026-10-13T06:00:00Z"})),Date.parse("2026-10-13T07:00:00Z"))).verdict).toBe("pass");
     // Calendar traversal across a year boundary; Friday is the only active day.
-    expect(assertionsResult({finishedAt:"2026-12-25T06:00:00Z"},rule.assertions,Date.parse("2027-01-01T06:59:59Z"),rule.timezone,[5]).verdict).toBe("pass");
+    expect(assertionsResult({finishedAt:"2026-12-25T06:00:00Z"},rule.assertions,Date.parse("2027-01-01T06:59:59Z"),rule.timezone,[5]).verdict).toBe("unknown");
   });
   test("off days do not claim health or resolve an existing incident",async()=>{
     const s=store(),rule=validateRule(raw),sat=Date.parse("2026-10-10T07:00:00Z"),sun=Date.parse("2026-10-11T07:00:00Z");
@@ -510,4 +510,25 @@ test("the app token goes to Space's own API only", async () => {
   await f("http://127.0.0.1:8701/api/checks/x");
   await f("http://127.0.0.1:87000/api/x");
   expect(seen).toEqual([["http://127.0.0.1:8700/api/tasks", "Bearer app-t"], ["http://127.0.0.1:8701/api/checks/x", null], ["http://127.0.0.1:87000/api/x", null]]);
+});
+
+test("daily rules wait before fetching or checking exists/ok and preserve incidents", async () => {
+  const s=store(), rule=validateRule({name:"Daily",url:"http://example.test",timezone:"Asia/Shanghai",weekdays:[2,3,4,5,6],failAfter:1,recoverAfter:1,assertions:[{path:"$.items[0]",operator:"exists"},{path:"$.items[0].ok",operator:"eq",value:true},{path:"$.items[0].finishedAt",operator:"dailyBy",value:"15:00"}]});
+  const fail=mockFetch(()=>({items:[{ok:true,finishedAt:"2026-09-29T07:00:00Z"}]}));
+  const sat=Date.parse("2026-10-17T07:00:00Z");
+  s.observe(await httpProbe(rule,fail,sat),sat);
+  const incident=s.activeIncident(rule.id)!.id;
+  for (const instant of ["2026-10-19T16:00:00Z","2026-10-20T06:59:59Z"]) {
+    const now=Date.parse(instant);
+    const sample=await httpProbe(rule,mockFetch(()=>{throw new Error("must not fetch");}),now);
+    expect(sample.code).toBe("rule_before_deadline");
+    expect(s.observe(sample,now)).toMatchObject({status:"off",successes:0});
+    expect(s.activeIncident(rule.id)?.id).toBe(incident);
+  }
+  const deadline=Date.parse("2026-10-20T07:00:00Z");
+  expect((await httpProbe(rule,fail,deadline)).code).toBe("daily_deadline_missed");
+  expect((await httpProbe(rule,mockFetch(()=>({items:[]})),deadline)).verdict).toBe("fail");
+  const success=await httpProbe(rule,mockFetch(()=>({items:[{ok:true,finishedAt:"2026-10-20T06:00:00Z"}]})),deadline);
+  expect(s.observe(success,deadline).status).toBe("healthy");
+  expect(s.activeIncident(rule.id)).toBeUndefined();
 });

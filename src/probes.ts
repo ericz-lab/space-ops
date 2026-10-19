@@ -1,6 +1,6 @@
 import { freemem, totalmem, loadavg, cpus } from "node:os";
 import { statfs, readFile } from "node:fs/promises";
-import { assertionsResult, field, validInstant, ruleActive } from "./rules.ts";
+import { assertionsResult, field, validInstant, ruleActive, pendingDeadline } from "./rules.ts";
 import type { Rule, Sample, Settings, Check, TaskPolicy } from "./types.ts";
 
 /**
@@ -35,6 +35,8 @@ export async function limitedText(response: Response, limit = 2_000_000): Promis
 export async function httpProbe(rule: Rule, fetcher: typeof fetch = fetch, now = Date.now()): Promise<Sample> {
   const base: Sample = { id: rule.id, name: rule.name, app: rule.app, kind: "http", verdict: "unknown", code: "unknown", detail: "", coverage: rule.assertions.length ? "assertion" : "availability", failAfter: rule.failAfter, recoverAfter: rule.recoverAfter, severity: rule.severity, staleAfterMs: rule.intervalMs * 3 + rule.timeoutMs };
   if (!ruleActive(rule, now)) return { ...base, code: "rule_offday", detail: `No check scheduled today (${rule.timezone})` };
+  const pending = pendingDeadline(rule.assertions, now, rule.timezone);
+  if (pending) return { ...base, code: "rule_before_deadline", detail: `Waiting until ${pending} today (${rule.timezone})` };
   const started = performance.now();
   try {
     const response = await fetcher(rule.url, { signal: AbortSignal.timeout(rule.timeoutMs), redirect: "error", headers: { accept: "application/json" } });
