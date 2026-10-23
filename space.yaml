@@ -10,6 +10,10 @@ i18n:
   zh:
     title: 运维中心
     description: 通用巡检、数据断言与故障追踪，统一查看本机及 peer 的运行状态。
+    agents:
+      operator:
+        title: 运维助手
+        description: 查看系统状态、巡检和故障证据，排查本机及 peer 的运行问题。
 service:
   command: bun src/index.ts
   port: 8998
@@ -20,6 +24,15 @@ service:
     OPS_LOGS_COMMAND: ${OPS_LOGS_COMMAND:-}
 storage:
   database: sqlite
+skills:
+  - path: skills/space-ops
+agents:
+  - name: operator
+    title: Space Ops Assistant
+    description: Inspect system status, daily checks and incident evidence, and troubleshoot local and peer failures.
+    prompt: agents/operator.md
+    tools: [Read, Glob, Grep, "Bash(bun src/inspect.ts *)"]
+    skills: [./skills/space-ops]
 # The one-click diagnosis (tag `diagnose`) defaults to Codex's advanced tier; the panel may override it.
 model:
   tags:

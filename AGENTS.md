@@ -20,6 +20,8 @@ Read README.md before changing behavior. Motivation and scope: GitHub issue #1.
 
 - `src/`: schema, reusable rules/probes, collector, API and colocated tests. `diagnose.ts` is the one-click AI diagnosis: evidence collection, the model call (tag `diagnose`), report parsing.
 - `web/`: Apple-inspired responsive UI, English/Chinese dictionaries, HTML bundled by Bun.
+- `agents/`: the panel operations assistant's system prompt.
+- `skills/space-ops/`: portable read-only system status and troubleshooting workflow; `src/inspect.ts` queries local evidence and authenticated peer proxies.
 - `deploy/`: repeatable Git deployment bootstrap and post-receive hook.
 - `.githooks/`: pre-push validation hook (`git config core.hooksPath .githooks`).
 - `data/`: ignored local development database.

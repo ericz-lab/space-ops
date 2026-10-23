@@ -1,5 +1,5 @@
 {
   "name": "space-ops", "version": "0.1.0", "private": true, "type": "module",
-  "scripts": { "start": "bun src/index.ts", "dev": "bun --hot src/index.ts", "typecheck": "tsc --noEmit", "test": "bun test", "check": "bun install --frozen-lockfile && bun run typecheck && bun test" },
+  "scripts": { "start": "bun src/index.ts", "dev": "bun --hot src/index.ts", "inspect": "bun src/inspect.ts", "typecheck": "tsc --noEmit", "test": "bun test", "check": "bun install --frozen-lockfile && bun run typecheck && bun test" },
   "devDependencies": { "@types/bun": "1.4.0", "typescript": "5.9.3" }
 }

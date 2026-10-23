@@ -56,6 +56,12 @@ The collector runs independently of Space tasks. It scans every 5 minutes by def
 - Every run is a report on the **Reports** page, kept on the machine that ran it, kept in SQLite (the latest 200), with status (running, completed, failed), time, the machines and applications covered, the evidence sources and whether each was read, the model that answered, and the report. A run that fails or times out (15 minutes) keeps its reason and offers **Retry**; one cut by a restart is marked failed on boot.
 - Service logs are read through `OPS_LOGS_COMMAND` (`{app}`, `{lines}`), set per machine in the workspace `.env` and passed in by `space.yaml`. Without it the report lists the logs as not checked.
 
+## Operations assistant and skill
+
+The manifest registers `space-ops/operator` (Space Ops Assistant / 运维助手) in the ai-space agent library and bundles the `space-ops` skill for system status and troubleshooting. Ask it “查看系统状态” or “排查失败的任务”. It reads current collector evidence and reports the affected machines, timestamps, likely causes and coverage gaps; status queries never repair or modify anything.
+
+The read-only command `bun src/inspect.ts status|evidence|check <id>|peer <name>|peer-evidence <name>` is also available from the app directory. Local reads use the manifest's service port; peer reads use `SPACE_API_URL` and `SPACE_APP_TOKEN` (or the operator token). It does not start a paid model diagnosis. Deploying and syncing the app registers the agent and links the skill into the workspace.
+
 ## Peers
 
 Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. Peer data and controls are read-only in the hub UI.
