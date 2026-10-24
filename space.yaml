@@ -14,6 +14,9 @@ i18n:
       operator:
         title: 运维助手
         description: 查看系统状态、巡检和故障证据，排查本机及 peer 的运行问题。
+      engineer:
+        title: 平台工程师
+        description: 维护 ai-space 本身：升级、备份与恢复、路由和 peer，并评审平台变更。
 service:
   command: bun src/index.ts
   port: 8998
@@ -32,6 +35,14 @@ agents:
     description: Inspect system status, daily checks and incident evidence, and troubleshoot local and peer failures.
     prompt: agents/operator.md
     tools: [Read, Glob, Grep, "Bash(bun src/inspect.ts *)"]
+    skills: [./skills/space-ops]
+  # The Platform Engineer holds the write tools the operator deliberately lacks: the space CLI
+  # (upgrades, backups and restores, router, peers, services) and bun for the platform checkout.
+  - name: engineer
+    title: Platform Engineer
+    description: Maintains ai-space itself - upgrades, backups and restores, the router and peers - and reviews platform changes before they reach production.
+    prompt: agents/engineer.md
+    tools: [Read, Glob, Grep, "Bash(bun src/inspect.ts *)", "Bash(space *)", "Bash(bun *)"]
     skills: [./skills/space-ops]
 # The one-click diagnosis (tag `diagnose`) defaults to Codex's advanced tier; the panel may override it.
 model:

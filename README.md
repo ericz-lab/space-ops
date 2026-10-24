@@ -60,6 +60,8 @@ The collector runs independently of Space tasks. It scans every 5 minutes by def
 
 The manifest registers `space-ops/operator` (Space Ops Assistant / 运维助手) in the ai-space agent library and bundles the `space-ops` skill for system status and troubleshooting. Ask it “查看系统状态” or “排查失败的任务”. It reads current collector evidence and reports the affected machines, timestamps, likely causes and coverage gaps; status queries never repair or modify anything.
 
+The manifest also registers `space-ops/engineer` (Platform Engineer / 平台工程师): the same skill and evidence, plus the write tools the operator deliberately lacks (`space *`, `bun *`), for ai-space upgrades, backups and restores, the router and peers, and reviewing platform changes. It states what it changes and asks before a restore.
+
 The read-only command `bun src/inspect.ts status|evidence|check <id>|peer <name>|peer-evidence <name>` is also available from the app directory. Local reads use the manifest's service port; peer reads use `SPACE_API_URL` and `SPACE_APP_TOKEN` (or the operator token). It does not start a paid model diagnosis. Deploying and syncing the app registers the agent and links the skill into the workspace.
 
 ## Peers
