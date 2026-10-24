@@ -84,10 +84,12 @@ describe("Host checks",()=>{
     expect(snap.version).toBe(1);
     expect(snap.resources?.memory?.totalBytes).toBeGreaterThan(0);expect(snap.resources?.disk?.percent).toBeGreaterThanOrEqual(0);expect(Number.isFinite(Date.parse(snap.resources!.sampledAt))).toBe(true);
     expect(snap.checks.find(c=>c.id==="host:cpu")?.status).toBe("unknown");
-    await e.scan();
-    expect(e.snapshot().resources?.cpu?.percent).toBeGreaterThanOrEqual(0);
-    expect(["healthy","failing","transient"]).toContain(e.snapshot().checks.find(c=>c.id==="host:cpu")?.status??"");
-    const dash=await (await api(e)(new Request("http://127.0.0.1:8998/api/dashboard"))).json() as {local:Snapshot;settings:{cpuPercent:number}};
+    // Two scans back to back may fall in one clock tick, so the CPU number is proven through the settle delay instead.
+    const settled=new Engine(store(),{api:"http://space.test",machine:"local",dataDir:import.meta.dir,retentionDays:30,cpuSettleMs:60},spaceFetch);
+    await settled.scan();
+    expect(settled.snapshot().resources?.cpu?.percent).toBeGreaterThanOrEqual(0);
+    expect(["healthy","failing","transient"]).toContain(settled.snapshot().checks.find(c=>c.id==="host:cpu")?.status??"");
+    const dash=await (await api(settled)(new Request("http://127.0.0.1:8998/api/dashboard"))).json() as {local:Snapshot;settings:{cpuPercent:number}};
     expect(dash.local.resources?.cpu).toBeDefined();expect(dash.settings.cpuPercent).toBe(90);
   });
   test("the CPU threshold is a validated setting",async()=>{
