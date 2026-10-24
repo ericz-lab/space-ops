@@ -21,13 +21,26 @@ export type IncidentEvent = { at: string; type: string; detail: string; by?: str
 export type Incident = { id: string; checkId: string; name: string; app: string; severity: "warning" | "critical"; status: "open" | "acknowledged" | "resolved"; openedAt: string; updatedAt: string; resolvedAt: string | null; detail: string; source?: "auto" | "manual"; resolvedBy?: string; events: IncidentEvent[] };
 /** Non-passing observations of one scan: from just after the previous scan to this one. */
 export type ScanRecord = { at: string; previousAt: string | null; checks: { id: string; name: string; app: string; kind: string; status: string; verdict: string; code: string; at: string }[] };
-export type Snapshot = { version: 1; machine: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[] };
+/**
+ * Measured host resources of one scan: CPU busy share over the interval between two samples (absent
+ * until a second sample exists), load averages, memory and the data disk. Bytes and percentages, UTC
+ * sample time. `source` says whether the number came from /proc or the OS estimate.
+ */
+export type HostResources = {
+  sampledAt: string;
+  /** Span of the two CPU samples the percentage covers. */
+  cpu?: { percent: number; cores: number; intervalMs: number; source: "proc" | "os" };
+  load?: { one: number; five: number; fifteen: number };
+  memory?: { usedBytes: number; totalBytes: number; availableBytes: number; percent: number; source: "proc" | "os" };
+  disk?: { usedBytes: number; totalBytes: number; percent: number; path: string };
+};
+export type Snapshot = { version: 1; machine: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources };
 /** `url`: where the snapshot is read; the peer's diagnosis evidence sits next to it. */
 export type PeerView = { name: string; url?: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null };
 /** Operator policy for one local task: success due within `deadlineMinutes` of its start; `errorThreshold` overrides the global one. */
 export type TaskPolicy = { deadlineMinutes?: number; errorThreshold?: number };
-export type Settings = { notifications: boolean; scanMinutes: number; failAfter: number; recoverAfter: number; taskErrorThreshold: number; diskPercent: number; memoryPercent: number };
-export const DEFAULT_SETTINGS: Settings = { notifications: false, scanMinutes: 5, failAfter: 3, recoverAfter: 2, taskErrorThreshold: 3, diskPercent: 90, memoryPercent: 95 };
+export type Settings = { notifications: boolean; scanMinutes: number; failAfter: number; recoverAfter: number; taskErrorThreshold: number; diskPercent: number; memoryPercent: number; cpuPercent: number };
+export const DEFAULT_SETTINGS: Settings = { notifications: false, scanMinutes: 5, failAfter: 3, recoverAfter: 2, taskErrorThreshold: 3, diskPercent: 90, memoryPercent: 95, cpuPercent: 90 };
 /** A check an app declares in space.yaml (`checks:`), as Space's GET /api/checks lists it. */
 export type DeclaredCheck = { id: string; app: string; appTitle: string; name: string; title?: string; description?: string; url: string; done: Assertion[]; when?: Assertion[]; due?: string; timezone?: string; i18n?: Record<string, { appTitle?: string; title?: string; description?: string }> };
 /** Inspection (点检) state: today's work is done, not due yet, late, not expected today, or unreadable. Never a fault. */
