@@ -64,6 +64,16 @@ The manifest also registers `space-ops/engineer` (Platform Engineer / 平台工�
 
 The read-only command `bun src/inspect.ts status|evidence|check <id>|peer <name>|peer-evidence <name>` is also available from the app directory. Local reads use the manifest's service port; peer reads use `SPACE_API_URL` and `SPACE_APP_TOKEN` (or the operator token). It does not start a paid model diagnosis. Deploying and syncing the app registers the agent and links the skill into the workspace.
 
+## Machine room (机房)
+
+The **Machine room** page draws every machine, this one and its peers, as a server cabinet in a 3D room (CSS 3D, no library). Drag to turn the room; click a cabinet to open that machine on the Overview. Everything it shows comes from the machine's latest snapshot:
+
+- **Roof lamp:** green when healthy, amber with one-off errors or checks awaiting evidence, flashing red with failing or recovering checks or an open incident, dark with no fresh snapshot.
+- **Server units:** the machine's checks spread over six units, worst first, so the share of red LEDs follows the share of failing checks. Paused checks have no light. LEDs blink faster as CPU use rises.
+- **Screen, memory sticks and drive bays:** CPU, memory and disk use, amber near their Settings threshold and red at it.
+
+A machine whose snapshot is stale goes dark and shows no signal: it is never drawn as healthy.
+
 ## Peers
 
 Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. Peer data and controls are read-only in the hub UI.
