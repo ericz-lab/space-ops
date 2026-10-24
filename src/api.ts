@@ -66,7 +66,7 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
       }
       if (path === "/api/settings" && req.method === "PUT") {
         const b=await body(), s=store.settings();
-        for (const [key,min,max] of [["scanMinutes",1,60],["failAfter",1,20],["recoverAfter",1,20],["taskErrorThreshold",1,20],["diskPercent",50,99],["memoryPercent",50,99]] as const) { if(b[key]!==undefined){if(!Number.isInteger(b[key])||b[key]<min||b[key]>max)throw new Error(`Invalid ${key}`);s[key]=b[key];} }
+        for (const [key,min,max] of [["scanMinutes",1,60],["failAfter",1,20],["recoverAfter",1,20],["taskErrorThreshold",1,20],["diskPercent",50,99],["memoryPercent",50,99],["cpuPercent",50,99]] as const) { if(b[key]!==undefined){if(!Number.isInteger(b[key])||b[key]<min||b[key]>max)throw new Error(`Invalid ${key}`);s[key]=b[key];} }
         if(b.notifications!==undefined){if(typeof b.notifications!=="boolean")throw new Error("Invalid notifications");if(b.notifications&&!engine.config.appToken)throw new Error("Space notification credentials are unavailable");s.notifications=b.notifications;}
         store.put("settings","main",s satisfies Settings); if(!s.notifications)store.db.exec("DELETE FROM outbox"); engine.reschedule(); return json({ok:true,settings:s});
       }

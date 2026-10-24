@@ -15,7 +15,7 @@ Space provisions the SQLite database, service environment and panel widget throu
 
 ## Checks
 
-- **Automatic discovery:** local active services, enabled tasks, source reachability, peer collectors, memory/load and disk at the data directory.
+- **Automatic discovery:** local active services, enabled tasks, source reachability, peer collectors, and the host itself: CPU busy share between two scans, memory (excluding reclaimable caches), load average and the disk at the data directory. The measured values are in the snapshot's `resources` section and on the Overview as a **Host resources** card per machine; CPU, memory and disk thresholds are in Settings.
 - **Task policies:** configured runtime plus 60 seconds grace; next scheduled or pending-event execution more than three minutes overdue; configurable consecutive failures; three consecutive skipped runs with no successful run in the last 24 hours (a no-op run after a success means "up to date"). A skip that answers a `reason` and no `error` (for example `{ "status": "skipped", "reason": "market_closed" }` on a holiday) is a planned no-op: healthy, even under an error threshold of one, and never counted as a repeated skip. Historical failures retain their original source timestamp. A failure below the threshold is a one-off error (see below).
 - **Per-task policy:** a task's detail sheet sets a success deadline ("must succeed within N minutes of its start") and its own failed-run threshold (`PUT /api/task-policies/:taskId`). A missed deadline, or a reached threshold of this policy, opens an incident on the first observation. Policies are local to the collector.
 - **HTTP:** explicit expected status, GET-only, configurable timeout and interval, no redirects, at most 2 MB for JSON assertions. Targets may be loopback/private addresses, so protect the UI with operator-only access. Do not put credentials in URLs.
@@ -83,7 +83,7 @@ SQLite in `DATABASE_URL`, otherwise `${SPACE_APP_DATA_DIR}/main.db`, otherwise l
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/healthz` | Collector progress health; 503 before first scan or after expiry |
-| GET | `/api/snapshot` | Versioned local-only observations, incidents and scan history |
+| GET | `/api/snapshot` | Versioned local-only observations, incidents, scan history and measured host resources (`resources`: cpu, load, memory, disk with the sample time) |
 | GET | `/api/dashboard` | Local snapshot, peers, custom rules, settings and notification state |
 | GET | `/api/checks/:id` | Check evidence and recent probe history |
 | POST | `/api/scan` | Start a coalesced scan; 202 |

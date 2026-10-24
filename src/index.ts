@@ -19,7 +19,7 @@ if(!Number.isInteger(retentionDays)||retentionDays<1||retentionDays>365)throw ne
 const peers=JSON.parse(process.env.OPS_PEERS??"[]") as {name:string;url:string}[];
 if(!Array.isArray(peers)||peers.some(p=>typeof p.name!=="string"||!/^https?:\/\//.test(p.url)))throw new Error("Invalid OPS_PEERS");
 const spaceApi=(process.env.SPACE_API_URL??"http://127.0.0.1:8700").replace(/\/$/,"");
-const engine=new Engine(store,{api:spaceApi,machine:process.env.SPACE_NAME||hostname(),dataDir:dir,retentionDays,appToken:process.env.SPACE_APP_TOKEN,peers},withSpaceToken(fetch,spaceApi,process.env.SPACE_APP_TOKEN));
+const engine=new Engine(store,{api:spaceApi,machine:process.env.SPACE_NAME||hostname(),dataDir:dir,retentionDays,appToken:process.env.SPACE_APP_TOKEN,peers,cpuSettleMs:1000},withSpaceToken(fetch,spaceApi,process.env.SPACE_APP_TOKEN));
 store.interruptReports();
 const diagnosis=new Diagnosis(engine,{logsCommand:process.env.OPS_LOGS_COMMAND?.trim()||undefined});
 const handler=api(engine,diagnosis);

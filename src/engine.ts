@@ -1,7 +1,7 @@
 import { ruleActive, pendingDeadline } from "./rules.ts";
 import { Store } from "./store.ts";
 import { declared, inspect } from "./inspections.ts";
-import { declaredNoop, hostSamples, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
+import { declaredNoop, hostSamples, httpProbe, readHostResources, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type CpuTicks, type Task } from "./probes.ts";
 import type { Check, PeerView, Sample, Snapshot, TaskPolicy } from "./types.ts";
 
 export class Engine {
@@ -9,7 +9,10 @@ export class Engine {
   private timer?: ReturnType<typeof setTimeout>;
   private stopped = true;
   private tickAt = 0;
-  constructor(readonly store: Store, readonly config: { api: string; machine: string; dataDir: string; retentionDays: number; appToken?: string; peers?: { name: string; url: string }[] }, readonly fetcher: typeof fetch = fetch) {}
+  /** CPU counters of the previous scan: the next scan's CPU percentage covers the interval between them. */
+  private cpuTicks: CpuTicks | null = null;
+  /** `cpuSettleMs`: on the first scan, wait this long between two CPU samples so the number exists at once (0 = wait for the next scan). */
+  constructor(readonly store: Store, readonly config: { api: string; machine: string; dataDir: string; retentionDays: number; appToken?: string; peers?: { name: string; url: string }[]; cpuSettleMs?: number }, readonly fetcher: typeof fetch = fetch) {}
   /** Scan cadence from Settings, so the operator changes it without a restart. */
   intervalMs() { return this.store.settings().scanMinutes * 60_000; }
   /** How long a scan stays current: four cadences, never under four minutes. */
@@ -81,7 +84,7 @@ export class Engine {
         await pool(list, 4, async c => this.store.putInspection(await inspect(c, this.fetcher, now)));
         this.store.retainInspections(list.map(c => c.id));
       }),
-      hostSamples(this.config.dataDir,settings).then(samples=>samples.forEach(observe)),
+      readHostResources(this.config.dataDir,this.cpuTicks,this.config.cpuSettleMs??0,now).then(({resources,ticks})=>{ this.cpuTicks=ticks; this.store.put("meta","resources",resources); hostSamples(resources,settings).forEach(observe); }),
       pool(this.store.rules(),4,async rule=>{
         seen.add(rule.id);
         const control = this.store.get<{enabled?:boolean}>("control",rule.id);

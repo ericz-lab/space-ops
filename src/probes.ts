@@ -1,7 +1,7 @@
 import { freemem, totalmem, loadavg, cpus } from "node:os";
 import { statfs, readFile } from "node:fs/promises";
 import { assertionsResult, field, validInstant, ruleActive, pendingDeadline } from "./rules.ts";
-import type { Rule, Sample, Settings, Check, TaskPolicy } from "./types.ts";
+import type { Rule, Sample, Settings, Check, HostResources, TaskPolicy } from "./types.ts";
 
 /**
  * Adds the app's SPACE_APP_TOKEN to requests for Space's own API, and only to those: a Space that
@@ -85,16 +85,79 @@ export function repeatedSkip(runs: TaskRun[], now = Date.now()): boolean {
   const ok = runs.find(r => r.status === "ok"), at = ok?.endedAt ?? ok?.startedAt;
   return !Number.isFinite(at) || now - at! > 86_400_000;
 }
-export async function hostSamples(dir: string, settings: Settings): Promise<Sample[]> {
-  let available=freemem();
+/** Aggregate CPU time: idle (idle + iowait) and total jiffies, with the sample instant. */
+export type CpuTicks = { idle: number; total: number; at: number };
+/** The `cpu` line of /proc/stat: user nice system idle iowait irq softirq steal [guest guest_nice]. */
+export function parseProcStat(text: string, at = Date.now()): CpuTicks | null {
+  const m = text.match(/^cpu\s+(.+)$/m); if (!m) return null;
+  const n = m[1]!.trim().split(/\s+/).map(Number);
+  if (n.length < 4 || n.some(x => !Number.isFinite(x) || x < 0)) return null;
+  // Guest time is already counted in user/nice; sum the first eight fields only.
+  const total = n.slice(0, 8).reduce((a, b) => a + b, 0), idle = n[3]! + (n[4] ?? 0);
+  return total > 0 ? { idle, total, at } : null;
+}
+/** The same shape from the OS module, for platforms without /proc. */
+export function osCpuTicks(at = Date.now()): CpuTicks {
+  let idle = 0, total = 0;
+  for (const c of cpus()) { idle += c.times.idle; total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq; }
+  return { idle, total, at };
+}
+/** Busy share between two samples, one decimal; null when nothing elapsed or the counters went backwards. */
+export function cpuPercent(prev: CpuTicks, next: CpuTicks): number | null {
+  const total = next.total - prev.total, idle = next.idle - prev.idle;
+  if (total <= 0 || idle < 0 || idle > total) return null;
+  return Math.round((1 - idle / total) * 1000) / 10;
+}
+/** /proc/loadavg: three averages, then running/total tasks and the last pid. */
+export function parseLoadavg(text: string): { one: number; five: number; fifteen: number } | null {
+  const n = text.trim().split(/\s+/, 3).map(Number);
+  return n.length === 3 && n.every(Number.isFinite) ? { one: n[0]!, five: n[1]!, fifteen: n[2]! } : null;
+}
+/** /proc/meminfo: total and available (what can be used without swapping, so caches do not count as used). */
+export function parseMeminfo(text: string): { totalBytes: number; availableBytes: number } | null {
+  const kb = (key: string) => { const m = text.match(new RegExp(`^${key}:\\s+(\\d+) kB$`, "m")); return m ? Number(m[1]) * 1024 : undefined; };
+  const totalBytes = kb("MemTotal"), availableBytes = kb("MemAvailable");
+  return totalBytes && availableBytes !== undefined && availableBytes <= totalBytes ? { totalBytes, availableBytes } : null;
+}
+export async function readCpuTicks(now = Date.now()): Promise<{ ticks: CpuTicks; source: "proc" | "os" }> {
+  if (process.platform === "linux") { try { const t = parseProcStat(await readFile("/proc/stat", "utf8"), now); if (t) return { ticks: t, source: "proc" }; } catch { /* Fall back to the OS counters. */ } }
+  return { ticks: osCpuTicks(now), source: "os" };
+}
+/**
+ * Measure this machine: CPU against `prev` (the previous scan's ticks; with none and `settleMs` > 0 a
+ * second sample is taken after that delay, otherwise CPU stays absent), load, memory and the data disk.
+ */
+export async function readHostResources(dir: string, prev: CpuTicks | null, settleMs = 0, now = Date.now()): Promise<{ resources: HostResources; ticks: CpuTicks }> {
+  let { ticks, source } = await readCpuTicks(now);
+  if (!prev && settleMs > 0) { prev = ticks; await Bun.sleep(settleMs); ({ ticks, source } = await readCpuTicks(Date.now())); }
+  const resources: HostResources = { sampledAt: new Date(ticks.at).toISOString() };
+  const percent = prev ? cpuPercent(prev, ticks) : null;
+  if (percent !== null) resources.cpu = { percent, cores: cpus().length || 1, intervalMs: ticks.at - prev!.at, source };
+  let load = { one: loadavg()[0]!, five: loadavg()[1]!, fifteen: loadavg()[2]! };
+  let memory: { totalBytes: number; availableBytes: number; source: "proc" | "os" } = { totalBytes: totalmem(), availableBytes: freemem(), source: "os" };
   if (process.platform === "linux") {
-    try { const info=await readFile("/proc/meminfo","utf8");const match=info.match(/^MemAvailable:\s+(\d+) kB$/m);if(match)available=Number(match[1])*1024; } catch { /* Fall back to the OS free-memory estimate. */ }
+    try { const l = parseLoadavg(await readFile("/proc/loadavg", "utf8")); if (l) load = l; } catch { /* Keep the OS load average. */ }
+    try { const m = parseMeminfo(await readFile("/proc/meminfo", "utf8")); if (m) memory = { ...m, source: "proc" }; } catch { /* Fall back to the OS free-memory estimate. */ }
   }
-  const memory = Math.round((1-available/totalmem())*1000)/10;
+  resources.load = { one: round2(load.one), five: round2(load.five), fifteen: round2(load.fifteen) };
+  if (memory.totalBytes > 0) resources.memory = { ...memory, usedBytes: memory.totalBytes - memory.availableBytes, percent: Math.round((1 - memory.availableBytes / memory.totalBytes) * 1000) / 10 };
+  try { const fs = await statfs(dir); if (fs.blocks > 0) resources.disk = { usedBytes: (fs.blocks - fs.bavail) * fs.bsize, totalBytes: fs.blocks * fs.bsize, percent: Math.round((1 - fs.bavail / fs.blocks) * 1000) / 10, path: dir }; }
+  catch { /* No disk entry: the check below reports it unknown. */ }
+  return { resources, ticks };
+}
+const round2 = (n: number) => Math.round(n * 100) / 100;
+/** Host checks from one measurement. A number that could not be measured is unknown, never passing. */
+export function hostSamples(r: HostResources, settings: Settings): Sample[] {
   const base = { app: "host", kind: "host", coverage: "host" as const };
-  const out: Sample[] = [{ ...base, id: "host:memory", name: "Memory pressure", verdict: memory >= settings.memoryPercent ? "fail" : "pass", code: "host_memory", detail: process.platform === "linux" ? "Used memory excluding reclaimable memory (MemAvailable)" : "OS free-memory estimate; pressure is advisory", value: memory, threshold: settings.memoryPercent }, { ...base, id: "host:load", name: "System load", verdict: loadavg()[0]! > cpus().length * 2 ? "fail" : "pass", code: "host_load", detail: "One-minute load average relative to CPU count", value: Math.round(loadavg()[0]!*100)/100, threshold: cpus().length * 2 }];
-  try { const fs = await statfs(dir); const used = Math.round((1-fs.bavail/fs.blocks)*1000)/10; out.push({ ...base, id: "host:disk", name: "Data disk capacity", verdict: used >= settings.diskPercent ? "fail" : "pass", code: "host_disk", detail: "Filesystem capacity at the app data directory", value: used, threshold: settings.diskPercent }); }
-  catch { out.push({ ...base, id: "host:disk", name: "Data disk capacity", verdict: "unknown", code: "host_disk_unknown", detail: "Filesystem metrics unavailable" }); }
+  const out: Sample[] = [];
+  if (r.cpu) out.push({ ...base, id: "host:cpu", name: "CPU usage", verdict: r.cpu.percent >= settings.cpuPercent ? "fail" : "pass", code: "host_cpu", detail: `Busy share of all CPUs over the last ${Math.max(1, Math.round(r.cpu.intervalMs / 1000))} s${r.cpu.source === "os" ? "; OS counters" : ""}`, value: r.cpu.percent, threshold: settings.cpuPercent });
+  else out.push({ ...base, id: "host:cpu", name: "CPU usage", verdict: "unknown", code: "host_cpu_unknown", detail: "CPU usage needs two samples; awaiting the next scan", threshold: settings.cpuPercent });
+  if (r.memory) out.push({ ...base, id: "host:memory", name: "Memory pressure", verdict: r.memory.percent >= settings.memoryPercent ? "fail" : "pass", code: "host_memory", detail: r.memory.source === "proc" ? "Used memory excluding reclaimable memory (MemAvailable)" : "OS free-memory estimate; pressure is advisory", value: r.memory.percent, threshold: settings.memoryPercent });
+  else out.push({ ...base, id: "host:memory", name: "Memory pressure", verdict: "unknown", code: "host_memory_unknown", detail: "Memory metrics unavailable", threshold: settings.memoryPercent });
+  const cores = r.cpu?.cores ?? cpus().length ?? 1;
+  if (r.load) out.push({ ...base, id: "host:load", name: "System load", verdict: r.load.one > cores * 2 ? "fail" : "pass", code: "host_load", detail: "One-minute load average relative to CPU count", value: r.load.one, threshold: cores * 2 });
+  if (r.disk) out.push({ ...base, id: "host:disk", name: "Data disk capacity", verdict: r.disk.percent >= settings.diskPercent ? "fail" : "pass", code: "host_disk", detail: "Filesystem capacity at the app data directory", value: r.disk.percent, threshold: settings.diskPercent });
+  else out.push({ ...base, id: "host:disk", name: "Data disk capacity", verdict: "unknown", code: "host_disk_unknown", detail: "Filesystem metrics unavailable" });
   return out;
 }
 

@@ -94,6 +94,13 @@ footer{padding:16px 32px 28px;text-align:center;color:var(--tertiary);font-size:
 .row .value{color:var(--secondary);font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
 .meter{width:72px;height:6px;border-radius:3px;background:var(--fill);display:block;overflow:hidden}
 .meter>span{display:block;height:100%;background:var(--green);border-radius:3px}
+/* Host resources: value and a bar that keeps its colour meaning on every width. */
+.row.res{min-height:56px}
+.res-value{font-size:15px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--label)}
+.gauge{width:96px;height:6px;border-radius:3px;background:var(--fill);display:block;overflow:hidden}
+.gauge>span{display:block;height:100%;border-radius:3px;background:var(--green);transition:width .3s}
+.gauge>span.warn{background:var(--orange)}.gauge>span.bad{background:var(--red)}.gauge>span.stale{background:var(--gray)}
+.list.stale .res-value,.list.stale .row-main{color:var(--tertiary)}
 .group-title{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:28px 4px 8px}
 .group-title h2{font-size:20px;font-weight:700;letter-spacing:-.02em}
 .group-title h2 span{font-size:15px;font-weight:500;color:var(--secondary);margin-left:8px}
@@ -236,7 +243,7 @@ dialog[open]{animation:sheet-in .28s cubic-bezier(.2,.9,.3,1)}
   .group-title h2{font-size:20px}
   .search{min-width:0;width:100%}
   .filterbar{flex-direction:column;align-items:stretch}
-  .row .meter{display:none}
+  .row .meter{display:none}.gauge{width:64px}
   .row-trail small{display:none}
   .callout{flex-wrap:wrap}.callout .link{margin-left:42px}
   .tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:30;padding:6px 8px calc(6px + env(safe-area-inset-bottom));background:var(--bar);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-top:.5px solid var(--separator)}
