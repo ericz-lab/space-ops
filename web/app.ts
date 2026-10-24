@@ -1,5 +1,6 @@
 import type { Check, HostResources, Incident, Inspection, PeerView, Report, ReportItem, Rule, ScanRecord, Settings, Snapshot, Status, TaskPolicy } from "../src/types.ts";
 import { markdown } from "./markdown.ts";
+import { roomScene, bindRoom, type RackMachine } from "./room.ts";
 import { t, tn, lang, setLang, ago, until, date, type Key } from "./i18n.ts";
 
 const paths: Record<string,string> = {
@@ -13,6 +14,7 @@ const paths: Record<string,string> = {
   shield:'<path d="M12 2.5 19.5 5.5v6c0 5-3.4 8.6-7.5 10-4.1-1.4-7.5-5-7.5-10v-6z"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',layers:'<path d="m12 3 9.5 5-9.5 5-9.5-5zM2.5 12.5l9.5 5 9.5-5M2.5 16.5l9.5 5 9.5-5"/>',
   warn:'<path d="M12 3.5 22 20.5H2z"/><path d="M12 10v4.5M12 17.5h.01"/>',info:'<circle cx="12" cy="12" r="9"/><path d="M12 11v5.5M12 7.5h.01"/>',question:'<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17h.01"/>',
   globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9S14.5 18.4 12 21c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3"/>',cpu:'<rect x="6" y="6" width="12" height="12" rx="2.5"/><path d="M9.5 2.5V6M14.5 2.5V6M9.5 18v3.5M14.5 18v3.5M2.5 9.5H6M2.5 14.5H6M18 9.5h3.5M18 14.5h3.5"/>',
+  cube:'<path d="M12 2.8 20.5 7.5v9L12 21.2 3.5 16.5v-9z"/><path d="M3.5 7.5 12 12l8.5-4.5M12 12v9.2"/>',
   download:'<path d="M12 3.5V15m-4.5-4.5L12 15l4.5-4.5M4.5 16.5v4h15v-4"/>',
   doc:'<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',spark:'<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
 };
@@ -23,7 +25,7 @@ type Listed=Check&{machine:string;remote:boolean};
 type ListedIncident=Incident&{machine:string;remote:boolean};
 /** What a row shows: the stored status, plus a running task apart from missing evidence. */
 type Shown=Exclude<Status,"unknown">|"unknown"|"running";
-const PAGES=["overview","checks","inspections","incidents","reports","settings"] as const;
+const PAGES=["overview","room","checks","inspections","incidents","reports","settings"] as const;
 const SCAN_CHOICES=[1,2,5,10,15,30,60];
 const DAY=86_400_000;
 let data:Dashboard|null=null,page=(location.hash.slice(1)||"overview"),machine="all",filter="all",query="",offline=false;
@@ -58,13 +60,13 @@ function scanLine(){return `${t("lastScan")} ${ago(data?.local.lastScanAt)} · $
 function render(){
   if(!PAGES.includes(page as typeof PAGES[number]))page="overview";
   const active=incidents().filter(i=>i.status!=="resolved").length;
-  const nav=[["overview","grid","blue"],["checks","pulse","green"],["inspections","clipboard","teal"],["incidents","bell","red"],["reports","doc","purple"],["settings","gear","gray"]] as const;
+  const nav=[["overview","grid","blue"],["room","cube","indigo"],["checks","pulse","green"],["inspections","clipboard","teal"],["incidents","bell","red"],["reports","doc","purple"],["settings","gear","gray"]] as const;
   const late=inspections().filter(i=>i.state==="late").length;
   const machines=data?[{name:data.local.machine,ok:localFresh()},...data.peers.map(p=>({name:p.name,ok:p.status==="healthy"}))]:[];
   document.documentElement.lang=lang;
   root.innerHTML=`<aside class="sidebar"><a class="brand" href="#overview"><img src="/icon.svg" alt=""><span>Space Ops</span></a><nav class="source-list"><p class="group-label">${t("workspace")}</p>${nav.map(([p,i,c])=>`<button class="source-item ${page===p?"selected":""}" data-page="${p}">${sym(i,c)}<span>${t(p)}</span>${p==="incidents"&&active?`<span class="count">${active}</span>`:p==="inspections"&&late?`<span class="count soft">${late}</span>`:""}</button>`).join("")}<p class="group-label">${t("machines")}</p><button class="source-item ${machine==="all"?"selected":""}" data-machine="all">${sym("layers","purple")}<span>${t("allMachines")}</span></button>${machines.map(m=>`<button class="source-item ${machine===m.name?"selected":""}" data-machine="${esc(m.name)}">${sym("server",m.ok?"green":"gray")}<span>${esc(m.name)}</span><i class="dot ${m.ok?"on":""}"></i></button>`).join("")}</nav><div class="sidebar-foot"><i class="dot ${localFresh()?"on":"off"}"></i><div><strong>${t(localFresh()?"live":"disconnected")}</strong><small>${data?esc(scanLine()):"—"}</small></div></div></aside>
 <div class="content"><header class="toolbar"><div class="toolbar-title">${t(page as Key)}</div><div class="toolbar-actions">${machines.length>1?`<select class="machine-select" id="machine" aria-label="${t("machines")}"><option value="all">${t("allMachines")}</option>${machines.map(m=>`<option value="${esc(m.name)}" ${machine===m.name?"selected":""}>${esc(m.name)}</option>`).join("")}</select>`:""}<button class="tool-button" id="language" aria-label="${t("language")}">${lang==="zh"?"EN":"中"}</button>${diagnoseButton("tool-button")}<button class="tool-button" id="scan" ${data?.busy?"disabled":""} title="${t("scan")}" aria-label="${t("scan")}">${icon("refresh",data?.busy?"spin":"")}<span>${t(data?.busy?"scanning":"scan")}</span></button><button class="tool-button accent" id="new" title="${t("newCheck")}" aria-label="${t("newCheck")}">${icon("plus")}<span>${t("newCheck")}</span></button></div></header>
-<main><div class="large-title"><h1>${t(page as Key)}</h1><p>${t(page==="overview"?"subtitle":page==="checks"?"checksSub":page==="inspections"?"inspectionsSub":page==="incidents"?"incidentsSub":page==="reports"?"reportsSub":"settingsSub")}</p></div>${offline?`<div class="banner" role="alert">${icon("warn")}${t("loadFailed")}</div>`:""}${!data?`<div class="card empty">${icon("clock")}<h3>${t("noData")}</h3></div>`:page==="overview"?overview():page==="checks"?checksPage():page==="inspections"?inspectionPage():page==="incidents"?incidentPage():page==="reports"?reportsPage():settingsPage()}</main>
+<main><div class="large-title"><h1>${t(page as Key)}</h1><p>${t(page==="overview"?"subtitle":page==="room"?"roomSub":page==="checks"?"checksSub":page==="inspections"?"inspectionsSub":page==="incidents"?"incidentsSub":page==="reports"?"reportsSub":"settingsSub")}</p></div>${offline?`<div class="banner" role="alert">${icon("warn")}${t("loadFailed")}</div>`:""}${!data?`<div class="card empty">${icon("clock")}<h3>${t("noData")}</h3></div>`:page==="overview"?overview():page==="room"?roomPage():page==="checks"?checksPage():page==="inspections"?inspectionPage():page==="incidents"?incidentPage():page==="reports"?reportsPage():settingsPage()}</main>
 <footer>Space Ops · ${esc(data?.local.machine??"")} · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</footer></div>
 <nav class="tabbar">${nav.map(([p,i])=>`<button class="${page===p?"selected":""}" data-page="${p}">${icon(i)}<span>${t(p)}</span>${p==="incidents"&&active?`<i class="tab-badge">${active}</i>`:p==="inspections"&&late?`<i class="tab-badge soft">${late}</i>`:""}</button>`).join("")}</nav>`;
   bind();
@@ -105,6 +107,12 @@ ${groupTitle(t("machines"),snapshots.length)}<div class="list">${snapshots.map(m
 ${snapshots.map(m=>resourcesCard(m.name,m.snapshot?.resources,m.status==="healthy")).join("")}
 ${groupTitle(t("recentActivity"))}<section class="card chart"><div class="scan-history">${history.length?history.map(h=>{const total=Math.max(1,h.passing+h.failing+h.unknown+(h.transient??0));return `<button type="button" data-scan="${esc(h.at)}" data-host="${esc(historyHost)}" title="${esc(date(h.at))} · ${h.passing}/${total}" aria-label="${t("scanAt")} ${esc(date(h.at))}" class="scan-bar ${h.failing?"fail":h.transient?"oneoff":h.unknown?"unknown":""}" style="--ratio:${Math.max(10,100*h.passing/total)}%"></button>`;}).join(""):`<p class="muted">${t("noHistory")}</p>`}</div><div class="history-axis"><span>${history[0]?ago(history[0].at):"—"}</span><span>${t("historyHint")}</span></div></section>
 <div class="callout">${sym("shield","blue")}<div><strong>${t("coverageTitle")}</strong><p>${t("coverageDesc")}</p></div><button class="link" id="coverage-new">${t("newCheck")}${icon("plus")}</button></div>`;
+}
+/** Every machine as a cabinet; a peer whose snapshot is stale goes dark. */
+function roomPage(){
+  const local:RackMachine={name:data!.local.machine,local:true,fresh:localFresh(),checks:data!.local.checks,openIncidents:data!.local.incidents.filter(i=>i.status!=="resolved").length,resources:data!.local.resources};
+  const peers=data!.peers.map((p):RackMachine=>({name:p.name,local:false,fresh:p.status==="healthy"&&!!p.snapshot,checks:p.snapshot?.checks??[],openIncidents:(p.snapshot?.incidents??[]).filter(i=>i.status!=="resolved").length,resources:p.snapshot?.resources}));
+  return roomScene([local,...peers],data!.settings,machine);
 }
 function checksPage(){
   const cs=checks(),filtered=cs.filter(c=>matches(c,filter)&&`${c.name} ${c.app} ${c.machine}`.toLowerCase().includes(query.toLowerCase()));
@@ -231,6 +239,7 @@ async function showScan(at:string,host:string){
 }
 async function act(fn:()=>Promise<void>){try{await fn();}catch(e){toast((e as Error).message||t("error"));}}
 function bind(){
+  bindRoom(root,name=>{machine=name;navigate("overview");});
   root.querySelectorAll<HTMLElement>("[data-page]").forEach(el=>el.onclick=()=>navigate(el.dataset.page!));
   root.querySelectorAll<HTMLElement>("[data-goto]").forEach(el=>el.onclick=()=>{const [p,f]=el.dataset.goto!.split(":");navigate(p!,f);});
   root.querySelectorAll<HTMLElement>("[data-machine]").forEach(el=>el.onclick=()=>{machine=el.dataset.machine!;render();});
