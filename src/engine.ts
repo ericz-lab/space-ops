@@ -63,23 +63,39 @@ export class Engine {
         const d = await get("/api/peers"); if (!Array.isArray(d.peers)) throw new Error("Invalid peers response");
         const peers: { name:string; url:string }[] = d.peers.map((p:{name:string})=>({name:p.name,url:`${this.config.api}/api/peers/${encodeURIComponent(p.name)}/apps/space-ops/proxy/api/snapshot`}));
         for (const peer of this.config.peers ?? []) if (!peers.some(p=>p.name===peer.name)) peers.push(peer);
-        // The list answered: a peer no longer configured (removed or renamed) is forgotten, not left offline forever.
-        const live = new Set(peers.map(p=>p.name));
-        for (const old of this.store.list<PeerView>("peer")) if (!live.has(old.name)) { this.store.drop("peer",old.name); this.store.retire(`peer:${old.name}`,"Peer is no longer configured; check retired",now); }
+        // Read every listed peer first: a newly named peer's snapshot says whether it is a known machine renamed.
+        const known = this.store.list<PeerView>("peer"), read = new Map<string, Snapshot>();
         await pool(peers, 3, async p => {
-          const prev = this.store.get<PeerView>("peer",p.name);
           try {
             const snap = await readJson(p.url,10000,this.fetcher) as Snapshot;
             if (snap.version !== 1 || !Array.isArray(snap.checks) || !Array.isArray(snap.incidents) || typeof snap.machine !== "string" || !Number.isFinite(Date.parse(snap.generatedAt))) throw new Error("Invalid snapshot");
             const lease=Number.isFinite(snap.staleAfterMs)&&snap.staleAfterMs>=60_000&&snap.staleAfterMs<=14_400_000?snap.staleAfterMs:240_000;
             if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("Peer scan expired or clock differs");
+            read.set(p.name, snap);
+          } catch { /* Recorded below as unavailable. */ }
+        });
+        // The list answered, so a peer it no longer names was renamed or removed: a rename carries the machine's data over, a removal retires it.
+        // A rename can only land on a peer never read before (`fresh`): one already read is a machine of its own.
+        const live = new Set(peers.map(p=>p.name)), gone = known.filter(k=>!live.has(k.name)), fresh = peers.filter(p=>!known.some(k=>k.name===p.name&&k.snapshot));
+        for (const [from, to] of renames(gone, fresh.flatMap(p=>{const snap=read.get(p.name);return snap?[{name:p.name,snapshot:snap}]:[];}))) this.store.renamePeer(from, to, now, `Peer renamed from ${from} to ${to} (same Space Ops collector)`);
+        // A newly named peer not read yet may be one of them: wait for it, a day at most, before retiring.
+        const unread = fresh.some(p=>!read.has(p.name));
+        for (const old of gone) {
+          if (!this.store.get<PeerView>("peer",old.name)) continue;
+          const since = old.missingSince ?? new Date(now).toISOString();
+          if (unread && now-Date.parse(since) < RENAME_WAIT_MS) { this.store.put("peer",old.name,{...old,missingSince:since} satisfies PeerView); seen.add(`peer:${old.name}`); continue; }
+          this.store.drop("peer",old.name); this.store.retire(`peer:${old.name}`,"Peer is no longer configured; check retired",now);
+        }
+        for (const p of peers) {
+          const prev = this.store.get<PeerView>("peer",p.name), snap = read.get(p.name);
+          if (snap) {
             this.store.put("peer",p.name,{name:p.name,url:p.url,status:"healthy",snapshot:snap,receivedAt:new Date().toISOString()} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"pass",code:"peer_ok",detail:"Peer collector is reporting fresh observations"});
-          } catch {
+          } else {
             this.store.put("peer",p.name,{name:p.name,url:p.url,status:"unknown",error:"Peer collector is unavailable or its snapshot expired",snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",code:"peer_unavailable",detail:"Peer collector is unavailable or its snapshot expired"});
           }
-        });
+        }
       }),
       // Apps' declared checks (点检): read for the inspection page, never observed as faults.
       source("checks", async () => {
@@ -107,7 +123,7 @@ export class Engine {
     this.store.finishScan(); this.store.prune(this.config.retentionDays);
     await this.deliver();
   }
-  peers(now=Date.now()): PeerView[] { return this.store.list<PeerView>("peer").map(p=>p.receivedAt && now-Date.parse(p.receivedAt)<=this.leaseMs() ? p : {...p,status:"unknown",error:"Peer snapshot expired"}); }
+  peers(now=Date.now()): PeerView[] { return this.store.list<PeerView>("peer").filter(p=>!p.missingSince).map(p=>p.receivedAt && now-Date.parse(p.receivedAt)<=this.leaseMs() ? p : {...p,status:"unknown",error:"Peer snapshot expired"}); }
   async deliver() {
     if (!this.store.settings().notifications || !this.config.appToken) return;
     const rows = this.store.db.query("SELECT * FROM outbox WHERE next_at<=? AND attempts<10 ORDER BY next_at LIMIT 5").all(Date.now()) as {id:string;body:string;attempts:number}[];
@@ -122,5 +138,23 @@ export class Engine {
       }
     }
   }
+}
+/** How long a peer the Space list stopped naming waits for an unread new peer to say whether it is the same machine. */
+export const RENAME_WAIT_MS = 86_400_000;
+/**
+ * Which gone peers reappear under a new name. The same machine is told by its Space Ops collector id; a
+ * collector too old to report one is matched by the name the machine calls itself (SPACE_NAME), and only
+ * when exactly one gone and one new peer share it. Anything else is not a rename.
+ */
+export function renames(gone: { name: string; snapshot: Snapshot | null }[], fresh: { name: string; snapshot: Snapshot }[]): [string, string][] {
+  const out: [string, string][] = [], taken = new Set<string>();
+  for (const n of fresh) {
+    const byId = n.snapshot.collector ? gone.filter(g => g.snapshot?.collector === n.snapshot.collector) : [];
+    const bySelf = gone.filter(g => g.snapshot && !(g.snapshot.collector && n.snapshot.collector) && g.snapshot.machine === n.snapshot.machine);
+    const twins = fresh.filter(f => f.snapshot.machine === n.snapshot.machine && !(f.snapshot.collector && n.snapshot.collector && f.snapshot.collector !== n.snapshot.collector));
+    const match = byId.length === 1 ? byId[0] : !byId.length && bySelf.length === 1 && twins.length === 1 ? bySelf[0] : undefined;
+    if (match && !taken.has(match.name)) { taken.add(match.name); out.push([match.name, n.name]); }
+  }
+  return out;
 }
 async function pool<T>(items:T[], concurrency:number, fn:(item:T)=>Promise<void>) { let index=0; await Promise.all(Array.from({length:Math.min(items.length,concurrency)},async()=>{while(index<items.length){const item=items[index++]!;await fn(item);}})); }

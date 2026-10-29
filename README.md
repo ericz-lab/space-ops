@@ -76,7 +76,9 @@ A machine whose snapshot is stale goes dark and shows no signal: it is never dra
 
 ## Peers
 
-Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. A peer that the answered peer list no longer names (removed, or renamed in the Space configuration) is forgotten and its peer check retired, so a renamed machine does not stay behind as an offline entry; an unreadable list removes nothing. Peer data and controls are read-only in the hub UI.
+Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. When the answered peer list no longer names a peer, Space Ops tells a rename from a removal. Every collector keeps an id of its own in its database and puts it in its snapshot (`collector`); a newly named peer whose snapshot carries the id of a peer that is gone is the same machine renamed, and everything kept under the old name moves to the new one: the peer view, the peer check with its pause and mute, its observation history, its incidents (an open one stays open, with a "renamed" event) and the machine names of past diagnosis reports (their text stays as written). A collector too old to report an id is matched by the name the machine calls itself (`SPACE_NAME`), only when exactly one gone and one new peer share it. A gone peer that matches no new peer was removed: it is forgotten and its peer check retired (an automatic incident resolved, an operator's left open). While a newly named peer cannot be read yet, a gone peer waits, unlisted, for up to a day before it is retired. An unreadable list changes nothing.
+
+A rename the collector cannot tell by itself (for example an old collector whose machine also changed its own name) is moved by hand on the hub: `POST /api/peers/:old/rename` with `{"to":"<new name>"}` (same-origin JSON, like every write). The new name must be a configured peer and the old one must not be; it also moves what an earlier retirement left behind (history, incidents, reports). Peer data and controls are read-only in the hub UI.
 
 `OPS_PEERS` optionally supplies a JSON array of `{name,url}` for additional independently reachable snapshot endpoints (for example, a loopback SSH tunnel). It does not invent reverse peers or transport credentials. A third-party monitor is required to detect simultaneous loss of all collectors.
 
@@ -99,6 +101,7 @@ SQLite in `DATABASE_URL`, otherwise `${SPACE_APP_DATA_DIR}/main.db`, otherwise l
 | POST | `/api/scan` | Start a coalesced scan; 202 |
 | POST / PUT | `/api/rules` / `/api/rules/:id` | Create / update a validated custom rule |
 | PATCH | `/api/checks/:id` | `{enabled}` or `{muteMinutes}` |
+| POST | `/api/peers/:old/rename` | Move what is kept under a renamed peer's old name to `{to}`, a configured peer; 404 when nothing is kept |
 | POST | `/api/incidents` | Open an incident: `{checkId}` or `{name, app?}`, plus `{detail, severity?}`; 201 |
 | POST | `/api/incidents/:id/ack` | Acknowledge (also `POST /api/incidents/:id`) |
 | POST | `/api/incidents/:id/notes` | Add a repair record `{text}` |

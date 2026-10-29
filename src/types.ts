@@ -34,9 +34,14 @@ export type HostResources = {
   memory?: { usedBytes: number; totalBytes: number; availableBytes: number; percent: number; source: "proc" | "os" };
   disk?: { usedBytes: number; totalBytes: number; percent: number; path: string };
 };
-export type Snapshot = { version: 1; machine: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources };
-/** `url`: where the snapshot is read; the peer's diagnosis evidence sits next to it. */
-export type PeerView = { name: string; url?: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null };
+/** `collector`: the collector's own id (Store.collectorId), the same across renames; absent from older collectors. */
+export type Snapshot = { version: 1; machine: string; collector?: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources };
+/**
+ * `url`: where the snapshot is read; the peer's diagnosis evidence sits next to it. `missingSince`: the
+ * Space peer list stopped naming it while a newly named peer could not be read yet, so whether it was
+ * renamed or removed is still open; it is not listed meanwhile.
+ */
+export type PeerView = { name: string; url?: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null; missingSince?: string };
 /** Operator policy for one local task: success due within `deadlineMinutes` of its start; `errorThreshold` overrides the global one. */
 export type TaskPolicy = { deadlineMinutes?: number; errorThreshold?: number };
 export type Settings = { notifications: boolean; scanMinutes: number; failAfter: number; recoverAfter: number; taskErrorThreshold: number; diskPercent: number; memoryPercent: number; cpuPercent: number };

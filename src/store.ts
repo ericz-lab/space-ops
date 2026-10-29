@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { validInstant } from "./rules.ts";
-import { DEFAULT_SETTINGS, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
+import { DEFAULT_SETTINGS, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
 
 export class Store {
   readonly db: Database;
@@ -131,6 +131,51 @@ export class Store {
     const cs = this.list<Check>("check");
     this.db.query("INSERT OR REPLACE INTO scans(at,passing,failing,unknown,transient) VALUES(?,?,?,?,?)").run(now, cs.filter(c=>c.status === "healthy").length, cs.filter(c=>["failing","recovering"].includes(c.status)).length, cs.filter(c=>c.status === "unknown").length, cs.filter(c=>c.status === "transient").length);
   }
+  /** This collector's own id, made once and kept in its database: it names the machine's Space Ops across renames of the machine or of its peer entry. */
+  collectorId(): string {
+    const id = this.get<string>("meta", "collector"); if (id) return id;
+    const made = crypto.randomUUID(); this.put("meta", "collector", made); return made;
+  }
+  /**
+   * A peer renamed from `from` to `to`: everything this collector keys by the peer's name follows it, so the
+   * machine keeps its history instead of starting again. The peer view, the peer check, its pause/mute
+   * control, its observations, its incidents (an open one gets a "renamed" event) and the targets of past
+   * diagnosis reports. What `to` already holds wins over `from`; a report's text stays as written.
+   */
+  renamePeer(from: string, to: string, now = Date.now(), detail = `Peer renamed from ${from} to ${to}`) {
+    if (!from || !to || from === to) throw new Error("Two different peer names required");
+    return this.db.transaction(() => {
+      const at = new Date(now).toISOString(), oldId = `peer:${from}`, newId = `peer:${to}`;
+      const moved = { peer: false, check: false, observations: 0, incidents: 0, reports: 0 };
+      const view = this.get<PeerView>("peer", from);
+      if (view) { if (!this.get("peer", to)) this.put("peer", to, { ...view, name: to, url: view.url?.replace(`/api/peers/${encodeURIComponent(from)}/`, `/api/peers/${encodeURIComponent(to)}/`), missingSince: undefined } satisfies PeerView); this.drop("peer", from); moved.peer = true; }
+      const oldCheck = this.get<Check>("check", oldId), newCheck = this.get<Check>("check", newId);
+      if (oldCheck) {
+        const later = (a?: string | null, b?: string | null) => (a ?? "") > (b ?? "") ? a ?? null : b ?? null;
+        this.put("check", newId, newCheck ? { ...newCheck, lastPassedAt: later(newCheck.lastPassedAt, oldCheck.lastPassedAt) } : { ...oldCheck, id: newId, name: oldCheck.name === from ? to : oldCheck.name });
+        this.drop("check", oldId); moved.check = true;
+      }
+      const oldControl = this.get<object>("control", oldId);
+      if (oldControl) { this.put("control", newId, { ...oldControl, ...this.get<object>("control", newId) }); this.drop("control", oldId); }
+      moved.observations = this.db.query("UPDATE observations SET check_id=? WHERE check_id=?").run(newId, oldId).changes;
+      const open = this.activeIncident(newId);
+      for (const i of this.list<Incident>("incident").filter(i => i.checkId === oldId)) {
+        i.checkId = newId; if (i.name === from) i.name = to;
+        if (i.status !== "resolved") {
+          i.updatedAt = at; i.events = trimEvents([...i.events, { at, type: "renamed", detail }]);
+          // One open incident per check: the machine's own is already open under the new name.
+          if (open) { i.status = "resolved"; i.resolvedAt = at; i.resolvedBy = "renamed"; i.events.push({ at, type: "resolved", detail: `${detail}; an incident is already open under the new name` }); }
+        }
+        this.put("incident", i.id, i); moved.incidents++;
+      }
+      for (const r of (this.db.query("SELECT body FROM reports").all() as { body: string }[]).map(r => JSON.parse(r.body) as Report)) {
+        if (!(r.machines ?? []).includes(from) && !r.coverage.some(c => c.machine === from) && !r.targets.some(t => t === from || t.startsWith(`${from}/`))) continue;
+        this.putReport({ ...r, ...(r.machines ? { machines: r.machines.map(m => m === from ? to : m) } : {}), targets: r.targets.map(t => t === from ? to : t.startsWith(`${from}/`) ? to + t.slice(from.length) : t), coverage: r.coverage.map(c => c.machine === from ? { ...c, machine: to } : c) });
+        moved.reports++;
+      }
+      return moved;
+    })();
+  }
   snapshot(machine: string, now = Date.now(), staleAfterMs = 240_000): Snapshot {
     const last = this.get<number>("meta", "scan");
     const checks = this.list<Check>("check").map(c => c.status !== "paused" && now - Date.parse(c.observedAt) > (c.staleAfterMs ?? 180_000) ? { ...c, status: "unknown" as const, code: "stale_observation", detail: "Observation expired; awaiting a fresh probe" } : c);
@@ -141,7 +186,7 @@ export class Store {
     const inspections = this.list<Inspection>("inspection").map(i => now - Date.parse(i.observedAt) > staleAfterMs ? { ...i, state: "unknown" as const, detail: "Reading expired; awaiting a fresh scan" } : i);
     // Measured numbers travel with their sample time; a reader judges freshness by it and by lastScanAt.
     const resources = this.get<HostResources>("meta", "resources");
-    return { version: 1, machine, generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections, ...(resources ? { resources } : {}) };
+    return { version: 1, machine, collector: this.collectorId(), generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections, ...(resources ? { resources } : {}) };
   }
   /** One inspection reading; `doneAt` remembers the last reading that was done. */
   putInspection(reading: Omit<Inspection, "doneAt">) {

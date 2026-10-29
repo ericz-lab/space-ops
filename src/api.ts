@@ -54,6 +54,18 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
         void engine.scan().catch(()=>{});return json({ok:true,policy});
       }
       if (req.method === "GET" && path.startsWith("/api/scans/")) { const at=Date.parse(decodeURIComponent(path.slice(11))), record=Number.isFinite(at)?store.scanRecord(at):null; return record?json({ok:true,record}):json({ok:false,error:"Scan not found"},404); }
+      const renamePath=req.method === "POST" ? path.match(/^\/api\/peers\/([^/]+)\/rename$/) : null;
+      if (renamePath) {
+        // The explicit path for a rename the collector could not tell by itself: the old name's data moves to a configured peer.
+        const from=decodeURIComponent(renamePath[1]!), b=await body(), to=typeof b.to==="string"?b.to.trim():"";
+        if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(from) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(to) || from===to) throw new Error("Invalid peer names");
+        if (from===engine.config.machine || to===engine.config.machine) throw new Error("This machine is not a peer");
+        if (!engine.peers().some(p=>p.name===to)) return json({ok:false,error:"The new name is not a configured peer"},404);
+        if (engine.peers().some(p=>p.name===from)) return json({ok:false,error:"The old name is still a configured peer"},409);
+        const moved=store.renamePeer(from,to,Date.now(),`Peer renamed from ${from} to ${to} by an operator`);
+        if (!moved.peer && !moved.check && !moved.observations && !moved.incidents && !moved.reports) return json({ok:false,error:"Nothing is kept under the old name"},404);
+        return json({ok:true,from,to,moved});
+      }
       const incidentPath=req.method === "POST" ? path.match(/^\/api\/incidents(?:\/([^/]+)(?:\/(ack|notes|resolve))?)?$/) : null;
       if (incidentPath) {
         // The Space ingress (Cloudflare Access) names the operator; without it the record is anonymous.

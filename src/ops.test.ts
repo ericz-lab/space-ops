@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
 import { declaredNoop, httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
-import { Engine } from "./engine.ts";
+import { Engine, renames } from "./engine.ts";
 import { api, widget } from "./api.ts";
 import { DEFAULT_SETTINGS, type DeclaredCheck, type Sample } from "./types.ts";
 import { declared, evaluate, inspect } from "./inspections.ts";
@@ -137,14 +137,83 @@ describe("Collector and API",()=>{
     const e=engine(s,mockFetch(url=>{if(url.includes("/proxy/")){if(!online)throw new Error("offline");return{version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),checks:[],incidents:[],history:[]};}return url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[{name:"remote"}]};}));
     await e.scan();expect(e.peers()[0]?.status).toBe("healthy");online=false;await e.scan();expect(e.peers()[0]?.status).toBe("unknown");expect(e.peers()[0]?.snapshot?.machine).toBe("remote");
   });
-  test("a peer no longer configured (removed or renamed) is forgotten and its check retired",async()=>{
-    const s=store();let peers=[{name:"old-name"}];let online=true;
-    const e=engine(s,mockFetch(url=>{if(url.includes("/proxy/"))return{version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),checks:[],incidents:[],history:[]};if(url.endsWith("peers")){if(!online)throw new Error("offline");return{peers};}return url.endsWith("services")?{services:[]}:{tasks:[]};}));
-    await e.scan();expect(e.peers().map(p=>p.name)).toEqual(["old-name"]);
-    // An unreadable peer list removes nothing.
-    online=false;peers=[{name:"new-name"}];await e.scan();expect(e.peers().map(p=>p.name)).toEqual(["old-name"]);
-    online=true;await e.scan();
-    expect(e.peers().map(p=>p.name)).toEqual(["new-name"]);expect(s.get<CheckLike>("check","peer:old-name")).toBeNull();expect(s.get<CheckLike>("check","peer:new-name")?.status).toBe("healthy");
+  // A fake Space: `list` names the configured peers; `machines` maps a peer name to the collector answering for it (undefined = unreachable).
+  function peerSpace(){
+    const state={list:[] as string[],listOk:true,machines:{} as Record<string,{machine:string;collector?:string}|undefined>};
+    const f=mockFetch(url=>{
+      const m=url.match(/\/api\/peers\/([^/]+)\/apps\/space-ops\/proxy\//);
+      if(m){const c=state.machines[decodeURIComponent(m[1]!)];if(!c)throw new Error("offline");return{version:1,...c,generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),staleAfterMs:240_000,checks:[],incidents:[],history:[]};}
+      if(url.endsWith("/api/peers")){if(!state.listOk)throw new Error("offline");return{peers:state.list.map(name=>({name}))};}
+      return url.endsWith("services")?{services:[]}:{tasks:[]};
+    });
+    return {state,f};
+  }
+  test("a renamed peer keeps its check, history, controls, incidents and reports under the new name",async()=>{
+    const s=store(),{state,f}=peerSpace(),e=engine(s,f);
+    state.list=["old-name"];state.machines={"old-name":{machine:"box",collector:"c-1"}};
+    await e.scan();await e.scan();
+    // The machine went down for a while: an automatic incident opened on its peer check.
+    state.machines={};for(let i=0;i<3;i++)await e.scan();
+    const incident=s.activeIncident("peer:old-name")!;expect(incident).toBeDefined();
+    s.control("peer:old-name",{mutedUntil:"2099-01-01T00:00:00.000Z"});
+    s.putReport({id:"r1",machine:"local",machines:["local","old-name"],status:"done",lang:"en",startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),targets:["local","old-name","old-name/app"],coverage:[{name:"Health checks",status:"done",detail:"",machine:"old-name"}]});
+    const before=s.history("peer:old-name").length;
+    // An unreadable peer list changes nothing.
+    state.listOk=false;state.list=["new-name"];state.machines={"new-name":{machine:"box",collector:"c-1"}};await e.scan();
+    expect(e.peers().map(p=>p.name)).toEqual(["old-name"]);
+    state.listOk=true;await e.scan();
+    expect(e.peers().map(p=>p.name)).toEqual(["new-name"]);
+    expect(s.get("peer","old-name")).toBeNull();expect(s.get<CheckLike>("check","peer:old-name")).toBeNull();expect(s.get("control","peer:old-name")).toBeNull();
+    expect(s.history("peer:old-name")).toHaveLength(0);// One "not observed" while the list was unreadable, one pass after the rename.
+    expect(s.history("peer:new-name").length).toBe(before+2);
+    expect(s.get<{mutedUntil:string|null}>("check","peer:new-name")?.mutedUntil).toBe("2099-01-01T00:00:00.000Z");
+    // The same incident, not a retired one and a new one: it recovers on the machine's new name.
+    const moved=s.incident(incident.id);expect(moved.checkId).toBe("peer:new-name");expect(moved.name).toBe("new-name");expect(moved.events.some(ev=>ev.type==="renamed")).toBe(true);
+    expect(s.activeIncident("peer:new-name")?.id).toBe(incident.id);await e.scan();expect(s.incident(incident.id).resolvedBy).toBe("check");
+    const r=s.report("r1")!;expect(r.machines).toEqual(["local","new-name"]);expect(r.targets).toEqual(["local","new-name","new-name/app"]);expect(r.coverage[0]?.machine).toBe("new-name");
+  });
+  test("a removed peer is retired, and a new machine is not taken for it",async()=>{
+    const s=store(),{state,f}=peerSpace(),e=engine(s,f);
+    state.list=["old-name"];state.machines={"old-name":{machine:"box",collector:"c-1"}};await e.scan();
+    state.list=["other"];state.machines={other:{machine:"box",collector:"c-2"}};await e.scan();
+    expect(e.peers().map(p=>p.name)).toEqual(["other"]);expect(s.get("peer","old-name")).toBeNull();expect(s.get<CheckLike>("check","peer:old-name")).toBeNull();
+    expect(s.history("peer:other")).toHaveLength(1);expect(s.history("peer:old-name")).toHaveLength(1);
+  });
+  test("a gone peer waits, unlisted, until the newly named peer can say whether it is the same machine",async()=>{
+    const s=store(),{state,f}=peerSpace(),e=engine(s,f);
+    state.list=["old-name"];state.machines={"old-name":{machine:"box",collector:"c-1"}};await e.scan();
+    state.list=["new-name"];state.machines={};await e.scan();
+    expect(e.peers().map(p=>p.name)).toEqual(["new-name"]);expect(s.get<{missingSince?:string}>("peer","old-name")?.missingSince).toBeDefined();
+    state.machines={"new-name":{machine:"box",collector:"c-1"}};await e.scan();
+    expect(s.get("peer","old-name")).toBeNull();expect(s.history("peer:new-name").length).toBe(3);
+  });
+  test("a collector without an id is matched by the name the machine calls itself, only when that is unambiguous",()=>{
+    const snap=(machine:string,collector?:string)=>({version:1 as const,machine,...(collector?{collector}:{}),generatedAt:"",lastScanAt:null,staleAfterMs:240_000,checks:[],incidents:[],history:[]});
+    expect(renames([{name:"a",snapshot:snap("box")}],[{name:"b",snapshot:snap("box")}])).toEqual([["a","b"]]);
+    expect(renames([{name:"a",snapshot:snap("box")}],[{name:"b",snapshot:snap("box")},{name:"c",snapshot:snap("box")}])).toEqual([]);
+    expect(renames([{name:"a",snapshot:snap("box","c-1")}],[{name:"b",snapshot:snap("box","c-2")}])).toEqual([]);
+    expect(renames([{name:"a",snapshot:snap("box","c-1")}],[{name:"b",snapshot:snap("other","c-1")}])).toEqual([["a","b"]]);
+    expect(renames([{name:"a",snapshot:null}],[{name:"b",snapshot:snap("box")}])).toEqual([]);
+  });
+  test("an operator moves what an earlier retirement left under the old name",async()=>{
+    const s=store(),{state,f}=peerSpace(),e=engine(s,f),handler=api(e);
+    state.list=["old-name"];state.machines={"old-name":{machine:"box"}};await e.scan();
+    // Renamed while the machine also changed its own name: nothing ties the two, so the old one is retired.
+    state.list=["new-name"];state.machines={"new-name":{machine:"box-2"}};await e.scan();
+    expect(s.history("peer:old-name")).toHaveLength(1);
+    const post=(path:string,data:unknown)=>handler(new Request(`http://ops.test${path}`,{method:"POST",headers:{"content-type":"application/json",origin:"http://ops.test"},body:JSON.stringify(data)}));
+    expect((await post("/api/peers/new-name/rename",{to:"new-name"})).status).toBe(400);
+    expect((await post("/api/peers/old-name/rename",{to:"nobody"})).status).toBe(404);
+    expect((await post("/api/peers/new-name/rename",{to:"new-name-2"})).status).toBe(404);
+    const res=await post("/api/peers/old-name/rename",{to:"new-name"});expect(res.status).toBe(200);
+    expect(((await res.json()) as {moved:{observations:number}}).moved.observations).toBe(1);
+    expect(s.history("peer:old-name")).toHaveLength(0);expect(s.history("peer:new-name")).toHaveLength(2);
+    expect((await post("/api/peers/old-name/rename",{to:"new-name"})).status).toBe(404);
+  });
+  test("the snapshot carries a collector id that survives a restart",()=>{
+    const dir=mkdtempSync(join(tmpdir(),"space-ops-test-"));
+    try { const a=new Store(join(dir,"ops.db")),id=a.snapshot("m").collector;a.db.close();const b=new Store(join(dir,"ops.db"));expect(id).toBeTruthy();expect(b.snapshot("m").collector).toBe(id!);b.db.close(); }
+    finally {rmSync(dir,{recursive:true,force:true});}
   });
   test("same-origin JSON is required for mutations",async()=>{
     const s=store(),handler=api(engine(s));
