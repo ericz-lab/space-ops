@@ -137,6 +137,15 @@ describe("Collector and API",()=>{
     const e=engine(s,mockFetch(url=>{if(url.includes("/proxy/")){if(!online)throw new Error("offline");return{version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),checks:[],incidents:[],history:[]};}return url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[{name:"remote"}]};}));
     await e.scan();expect(e.peers()[0]?.status).toBe("healthy");online=false;await e.scan();expect(e.peers()[0]?.status).toBe("unknown");expect(e.peers()[0]?.snapshot?.machine).toBe("remote");
   });
+  test("a peer no longer configured (removed or renamed) is forgotten and its check retired",async()=>{
+    const s=store();let peers=[{name:"old-name"}];let online=true;
+    const e=engine(s,mockFetch(url=>{if(url.includes("/proxy/"))return{version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),checks:[],incidents:[],history:[]};if(url.endsWith("peers")){if(!online)throw new Error("offline");return{peers};}return url.endsWith("services")?{services:[]}:{tasks:[]};}));
+    await e.scan();expect(e.peers().map(p=>p.name)).toEqual(["old-name"]);
+    // An unreadable peer list removes nothing.
+    online=false;peers=[{name:"new-name"}];await e.scan();expect(e.peers().map(p=>p.name)).toEqual(["old-name"]);
+    online=true;await e.scan();
+    expect(e.peers().map(p=>p.name)).toEqual(["new-name"]);expect(s.get<CheckLike>("check","peer:old-name")).toBeNull();expect(s.get<CheckLike>("check","peer:new-name")?.status).toBe("healthy");
+  });
   test("same-origin JSON is required for mutations",async()=>{
     const s=store(),handler=api(engine(s));
     const request=(origin?:string)=>new Request("http://ops.test/api/rules",{method:"POST",headers:{"content-type":"application/json",...(origin?{origin}:{})},body:JSON.stringify({name:"API",url:"http://example.test"})});

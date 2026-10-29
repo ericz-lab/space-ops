@@ -76,7 +76,7 @@ A machine whose snapshot is stale goes dark and shows no signal: it is never dra
 
 ## Peers
 
-Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. Peer data and controls are read-only in the hub UI.
+Deploy the same app on each Space. A collector discovers configured Space peers and reads `/api/peers/:peer/apps/space-ops/proxy/api/snapshot`. Snapshots contain local observations only, preventing recursive fan-out. Failed refreshes retain the last snapshot as unknown. A peer that the answered peer list no longer names (removed, or renamed in the Space configuration) is forgotten and its peer check retired, so a renamed machine does not stay behind as an offline entry; an unreadable list removes nothing. Peer data and controls are read-only in the hub UI.
 
 `OPS_PEERS` optionally supplies a JSON array of `{name,url}` for additional independently reachable snapshot endpoints (for example, a loopback SSH tunnel). It does not invent reverse peers or transport credentials. A third-party monitor is required to detect simultaneous loss of all collectors.
 

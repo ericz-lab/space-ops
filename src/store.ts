@@ -20,6 +20,7 @@ export class Store {
   get<T>(kind: string, id: string): T | null { const r = this.db.query("SELECT body FROM documents WHERE kind=? AND id=?").get(kind, id) as { body: string } | null; return r ? JSON.parse(r.body) as T : null; }
   list<T>(kind: string): T[] { return (this.db.query("SELECT body FROM documents WHERE kind=? ORDER BY id").all(kind) as { body: string }[]).map(r => JSON.parse(r.body) as T); }
   put(kind: string, id: string, data: unknown) { this.db.query("INSERT INTO documents VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body").run(kind, id, JSON.stringify(data)); }
+  drop(kind: string, id: string) { this.db.query("DELETE FROM documents WHERE kind=? AND id=?").run(kind, id); }
   settings(): Settings { return { ...DEFAULT_SETTINGS, ...this.get<Settings>("settings", "main") }; }
   rules(): Rule[] { return this.list<Rule>("rule"); }
   activeIncident(id: string): Incident | undefined { return this.list<Incident>("incident").find(i => i.checkId === id && i.status !== "resolved"); }

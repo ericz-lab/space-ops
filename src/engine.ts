@@ -63,6 +63,9 @@ export class Engine {
         const d = await get("/api/peers"); if (!Array.isArray(d.peers)) throw new Error("Invalid peers response");
         const peers: { name:string; url:string }[] = d.peers.map((p:{name:string})=>({name:p.name,url:`${this.config.api}/api/peers/${encodeURIComponent(p.name)}/apps/space-ops/proxy/api/snapshot`}));
         for (const peer of this.config.peers ?? []) if (!peers.some(p=>p.name===peer.name)) peers.push(peer);
+        // The list answered: a peer no longer configured (removed or renamed) is forgotten, not left offline forever.
+        const live = new Set(peers.map(p=>p.name));
+        for (const old of this.store.list<PeerView>("peer")) if (!live.has(old.name)) { this.store.drop("peer",old.name); this.store.retire(`peer:${old.name}`,"Peer is no longer configured; check retired",now); }
         await pool(peers, 3, async p => {
           const prev = this.store.get<PeerView>("peer",p.name);
           try {
