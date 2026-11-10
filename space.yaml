@@ -3,7 +3,7 @@ name: space-ops
 title: Space Ops
 description: Monitor services, tasks and data with reusable checks, incident evidence and peer visibility.
 icon: icon.svg
-url: /
+url: /?lang={lang}&accent={accent}
 status: active
 repo: https://github.com/ericz-lab/space-ops.git
 i18n:
