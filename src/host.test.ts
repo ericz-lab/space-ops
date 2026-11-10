@@ -2,7 +2,7 @@ import { describe, test, expect, afterEach } from "bun:test";
 import { Store } from "./store.ts";
 import { Engine } from "./engine.ts";
 import { api } from "./api.ts";
-import { cpuPercent, hostSamples, osCpuTicks, parseLoadavg, parseMeminfo, parseProcStat, readHostResources } from "./probes.ts";
+import { cpuPercent, hostSamples, osCpuTicks, parseLoadavg, parseMeminfo, parseMemorystatusLevel, parseProcStat, readHostResources } from "./probes.ts";
 import { DEFAULT_SETTINGS, type HostResources, type Snapshot } from "./types.ts";
 
 const stores:Store[]=[];
@@ -48,6 +48,10 @@ describe("Host resource parsing",()=>{
     expect(parseMeminfo(MEMINFO)).toEqual({totalBytes:16000000*1024,availableBytes:6000000*1024});
     expect(parseMeminfo("MemTotal:  10 kB\n")).toBeNull();
     expect(parseMeminfo("MemTotal:  10 kB\nMemAvailable:  20 kB\n")).toBeNull();
+    expect(parseMemorystatusLevel("72\n")).toBe(72);
+    expect(parseMemorystatusLevel("101")).toBeNull();
+    expect(parseMemorystatusLevel("")).toBeNull();
+    expect(parseMemorystatusLevel("sysctl: unknown oid")).toBeNull();
   });
   test("a live reading has load, memory and disk; CPU appears only with a previous sample or a settle delay",async()=>{
     const first=await readHostResources(import.meta.dir,null);
@@ -76,6 +80,12 @@ describe("Host checks",()=>{
     expect(by(resources)["host:disk"]).toMatchObject({verdict:"pass",value:40,threshold:90});
     expect(by({...resources,disk:undefined})["host:disk"]).toMatchObject({verdict:"unknown",code:"host_disk_unknown"});
     expect(by({...resources,memory:undefined})["host:memory"]).toMatchObject({verdict:"unknown",code:"host_memory_unknown"});
+  });
+  test("kernel memory pressure alerts at the threshold; the OS free-memory estimate never alerts and is never healthy",()=>{
+    const mem=(source:"proc"|"kernel"|"os",percent:number)=>hostSamples({...resources,memory:{...resources.memory!,source,percent}},DEFAULT_SETTINGS).find(s=>s.id==="host:memory")!;
+    expect(mem("kernel",28)).toMatchObject({verdict:"pass",code:"host_memory",value:28});
+    expect(mem("kernel",96).verdict).toBe("fail");
+    expect(mem("os",99)).toMatchObject({verdict:"unknown",code:"host_memory_estimate",value:99,threshold:95});
   });
   test("a scan stores the measurement and the snapshot carries it under version 1",async()=>{
     const s=store(),e=new Engine(s,{api:"http://space.test",machine:"local",dataDir:import.meta.dir,retentionDays:30},spaceFetch);

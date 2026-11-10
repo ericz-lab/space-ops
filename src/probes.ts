@@ -119,6 +119,21 @@ export function parseMeminfo(text: string): { totalBytes: number; availableBytes
   const totalBytes = kb("MemTotal"), availableBytes = kb("MemAvailable");
   return totalBytes && availableBytes !== undefined && availableBytes <= totalBytes ? { totalBytes, availableBytes } : null;
 }
+/** `sysctl -n kern.memorystatus_level`: the share of memory (0-100) the macOS kernel counts as available, caches and compressible memory included. */
+export function parseMemorystatusLevel(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d{1,3}$/.test(t)) return null;
+  const n = Number(t);
+  return n <= 100 ? n : null;
+}
+/** macOS memory pressure as the kernel reports it; null when it cannot be read within a second. */
+async function readMemorystatusLevel(): Promise<number | null> {
+  try {
+    const p = Bun.spawn(["/usr/sbin/sysctl", "-n", "kern.memorystatus_level"], { stdout: "pipe", stderr: "ignore", timeout: 1000 });
+    const [text, code] = await Promise.all([new Response(p.stdout).text(), p.exited]);
+    return code === 0 ? parseMemorystatusLevel(text) : null;
+  } catch { return null; }
+}
 export async function readCpuTicks(now = Date.now()): Promise<{ ticks: CpuTicks; source: "proc" | "os" }> {
   if (process.platform === "linux") { try { const t = parseProcStat(await readFile("/proc/stat", "utf8"), now); if (t) return { ticks: t, source: "proc" }; } catch { /* Fall back to the OS counters. */ } }
   return { ticks: osCpuTicks(now), source: "os" };
@@ -134,7 +149,9 @@ export async function readHostResources(dir: string, prev: CpuTicks | null, sett
   const percent = prev ? cpuPercent(prev, ticks) : null;
   if (percent !== null) resources.cpu = { percent, cores: cpus().length || 1, intervalMs: ticks.at - prev!.at, source };
   let load = { one: loadavg()[0]!, five: loadavg()[1]!, fifteen: loadavg()[2]! };
-  let memory: { totalBytes: number; availableBytes: number; source: "proc" | "os" } = { totalBytes: totalmem(), availableBytes: freemem(), source: "os" };
+  let memory: { totalBytes: number; availableBytes: number; source: "proc" | "kernel" | "os" } = { totalBytes: totalmem(), availableBytes: freemem(), source: "os" };
+  // macOS free memory leaves out inactive and purgeable pages, so it sits near full on a healthy machine; the kernel's level does not.
+  if (process.platform === "darwin" && memory.totalBytes > 0) { const level = await readMemorystatusLevel(); if (level !== null) memory = { totalBytes: memory.totalBytes, availableBytes: Math.round(memory.totalBytes * level / 100), source: "kernel" }; }
   if (process.platform === "linux") {
     try { const l = parseLoadavg(await readFile("/proc/loadavg", "utf8")); if (l) load = l; } catch { /* Keep the OS load average. */ }
     try { const m = parseMeminfo(await readFile("/proc/meminfo", "utf8")); if (m) memory = { ...m, source: "proc" }; } catch { /* Fall back to the OS free-memory estimate. */ }
@@ -152,7 +169,9 @@ export function hostSamples(r: HostResources, settings: Settings): Sample[] {
   const out: Sample[] = [];
   if (r.cpu) out.push({ ...base, id: "host:cpu", name: "CPU usage", verdict: r.cpu.percent >= settings.cpuPercent ? "fail" : "pass", code: "host_cpu", detail: `Busy share of all CPUs over the last ${Math.max(1, Math.round(r.cpu.intervalMs / 1000))} s${r.cpu.source === "os" ? "; OS counters" : ""}`, value: r.cpu.percent, threshold: settings.cpuPercent });
   else out.push({ ...base, id: "host:cpu", name: "CPU usage", verdict: "unknown", code: "host_cpu_unknown", detail: "CPU usage needs two samples; awaiting the next scan", threshold: settings.cpuPercent });
-  if (r.memory) out.push({ ...base, id: "host:memory", name: "Memory pressure", verdict: r.memory.percent >= settings.memoryPercent ? "fail" : "pass", code: "host_memory", detail: r.memory.source === "proc" ? "Used memory excluding reclaimable memory (MemAvailable)" : "OS free-memory estimate; pressure is advisory", value: r.memory.percent, threshold: settings.memoryPercent });
+  // The OS free-memory estimate counts caches as used: it cannot establish pressure, so it never alerts (and is never healthy).
+  if (r.memory?.source === "os") out.push({ ...base, id: "host:memory", name: "Memory pressure", verdict: "unknown", code: "host_memory_estimate", detail: "OS free-memory estimate counts reclaimable caches as used; shown, not alerted on", value: r.memory.percent, threshold: settings.memoryPercent });
+  else if (r.memory) out.push({ ...base, id: "host:memory", name: "Memory pressure", verdict: r.memory.percent >= settings.memoryPercent ? "fail" : "pass", code: "host_memory", detail: r.memory.source === "proc" ? "Used memory excluding reclaimable memory (MemAvailable)" : "Kernel memory pressure: memory not available without compression or swap (kern.memorystatus_level)", value: r.memory.percent, threshold: settings.memoryPercent });
   else out.push({ ...base, id: "host:memory", name: "Memory pressure", verdict: "unknown", code: "host_memory_unknown", detail: "Memory metrics unavailable", threshold: settings.memoryPercent });
   const cores = r.cpu?.cores ?? cpus().length ?? 1;
   if (r.load) out.push({ ...base, id: "host:load", name: "System load", verdict: r.load.one > cores * 2 ? "fail" : "pass", code: "host_load", detail: "One-minute load average relative to CPU count", value: r.load.one, threshold: cores * 2 });

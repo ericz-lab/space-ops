@@ -24,14 +24,15 @@ export type ScanRecord = { at: string; previousAt: string | null; checks: { id: 
 /**
  * Measured host resources of one scan: CPU busy share over the interval between two samples (absent
  * until a second sample exists), load averages, memory and the data disk. Bytes and percentages, UTC
- * sample time. `source` says whether the number came from /proc or the OS estimate.
+ * sample time. `source` says where the number came from: /proc, the kernel's memory-pressure level
+ * (macOS `kern.memorystatus_level`) or the OS free-memory estimate.
  */
 export type HostResources = {
   sampledAt: string;
   /** Span of the two CPU samples the percentage covers. */
   cpu?: { percent: number; cores: number; intervalMs: number; source: "proc" | "os" };
   load?: { one: number; five: number; fifteen: number };
-  memory?: { usedBytes: number; totalBytes: number; availableBytes: number; percent: number; source: "proc" | "os" };
+  memory?: { usedBytes: number; totalBytes: number; availableBytes: number; percent: number; source: "proc" | "kernel" | "os" };
   disk?: { usedBytes: number; totalBytes: number; percent: number; path: string };
 };
 /** `collector`: the collector's own id (Store.collectorId), the same across renames; absent from older collectors. */
