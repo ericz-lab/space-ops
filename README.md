@@ -1,6 +1,6 @@
 # Space Ops
 
-A general-purpose operations center for ai-space. Independent collectors discover services and scheduled tasks, run reusable HTTP/JSON checks, record evidence, and track incidents through recovery. One Apple-inspired interface shows the local machine and its peers.
+A general-purpose operations center for ai-space. Independent collectors discover services and scheduled tasks, run reusable HTTP/JSON checks, record evidence, and track incidents through recovery. One interface, on the Space Tiles kit shared by ai-space's built-in apps, shows the local machine and its peers.
 
 ## Run
 

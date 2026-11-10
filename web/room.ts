@@ -48,11 +48,12 @@ export function roomScene(machines: RackMachine[], s: Settings, selected: string
     return rack(m, s, x, z, selected === m.name);
   }).join("");
   const count = (tone: Tone) => machines.filter(m => rackTone(m) === tone).length;
-  return `<section class="room" data-width="${width + 160}" style="--w:${W}px;--h:${H}px;--d:${D}px">
+  // The cabinets keep their own hardware look; the frame around them (tile, legend, note) is the kit's.
+  return `<section class="sp-tile room-tile"><div class="room" data-width="${width + 160}" style="--w:${W}px;--h:${H}px;--d:${D}px">
 <div class="room-zoom"><div class="orbit ${view.manual ? "manual" : ""}"><div class="stage" style="--rx:${view.rx}deg;--ry:${view.ry}deg">
-<div class="floor" style="width:${width + 520}px;height:${depth + 520}px"></div>${racks}</div></div></div>
-<div class="room-legend">${(["ok", "warn", "bad", "off"] as Tone[]).map(k => `<span class="legend-${k}"><i></i>${t(`room_${k}`)} <b>${count(k)}</b></span>`).join("")}<span class="room-hint">${t("roomHint")}</span></div></section>
-<p class="group-foot">${t("roomNote")}</p>`;
+<div class="floor" style="width:${width + 520}px;height:${depth + 520}px"></div>${racks}</div></div></div></div>
+<div class="room-legend" aria-label="${t("legend")}">${(["ok", "warn", "bad", "off"] as Tone[]).map(k => `<span class="sp-badge ${k}">${t(`room_${k}`)} <b>${count(k)}</b></span>`).join("")}<span class="room-hint">${t("roomHint")}</span></div></section>
+<p class="foot">${t("roomNote")}</p>`;
 }
 
 /** Drag turns the camera; a click without a drag opens that machine. */
