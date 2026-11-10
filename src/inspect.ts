@@ -18,8 +18,11 @@ export function inspectionRequest(args: string[], env: Record<string, string | u
 
 if (import.meta.main) {
   try {
-    const manifest = Bun.YAML.parse(await Bun.file(join(import.meta.dir, "../space.yaml")).text()) as { service: { port: number } };
-    const request = inspectionRequest(Bun.argv.slice(2), process.env, manifest.service.port);
+    // The port: the one an installed package was given (<data dir>/service.port, written by its entry; scripts/pack.ts), else the manifest's.
+    const manifest = Bun.YAML.parse(await Bun.file(join(import.meta.dir, "../space.yaml")).text()) as { service?: { port: number } };
+    const portFile = process.env.SPACE_APP_DATA_DIR ? Bun.file(join(process.env.SPACE_APP_DATA_DIR, "service.port")) : undefined;
+    const port = portFile && (await portFile.exists()) ? Number((await portFile.text()).trim()) : manifest.service?.port ?? 8998;
+    const request = inspectionRequest(Bun.argv.slice(2), process.env, port);
     const response = await fetch(request.url, { method: "GET", headers: request.headers, redirect: "error", signal: AbortSignal.timeout(request.timeoutMs), timeout: false });
     if (!response.ok) throw new Error(`Space Ops returned HTTP ${response.status}`);
     console.log(JSON.stringify(await response.json(), null, 2));
