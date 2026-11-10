@@ -27,6 +27,8 @@ const PAGES=["overview","checks","incidents","inspections","room","reports","set
 const SCAN_CHOICES=[1,2,5,10,15,30,60];
 const DAY=86_400_000;
 let data:Dashboard|null=null,page=(location.hash.slice(1)||"overview"),machine="all",filter="all",query="",inspQuery="",offline=false;
+/** The tab open in the overview's Watching tile, kept across visits. */
+let signalTab=(()=>{try{return localStorage.getItem("ops-signal-tab")??"";}catch{return "";}})();
 /** The incident in the overview's right column (`id@machine`), and the check or incident whose detail was opened last. */
 let asideKey="",selectedKey="";
 /** Unsent repair notes by incident, so the 15 s refresh never drops what is being typed. */
@@ -117,6 +119,8 @@ function actions(aside=false){const busy=!!data?.busy;return `${aside?`<button t
 function head(title:string,sub:string,acts=actions()){return `<header class="sp-head"><div class="head-title"><h1>${esc(title)}</h1><p class="sp-head-sub">${esc(sub)}</p></div>${acts?`<div class="sp-head-actions">${acts}</div>`:""}</header>`;}
 function tileHead(title:string,extra=""){return `<div class="tile-h"><h2 class="sp-tt"><span class="sp-sq" aria-hidden="true"></span>${title}</h2>${extra}</div>`;}
 const viewAll=(view:string)=>`<button type="button" class="sp-btn ghost sm" data-goto="${view}">${t("viewAll")}${icon("chevron")}</button>`;
+/** A heading on the canvas that opens a level of the overview: a title and one muted line. */
+function sectionHead(title:string,sub:string){return `<div class="sec-head"><h2>${esc(title)}</h2><p>${esc(sub)}</p></div>`;}
 function empty(text:string,ico="check",sub=""){return `<div class="sp-state small-state"><span class="ico">${icon(ico)}</span><p>${esc(text)}</p>${sub?`<p>${esc(sub)}</p>`:""}</div>`;}
 
 // ---------------------------------------------------------------- overview
@@ -136,17 +140,21 @@ function overview(){
   const stats:[Key,number,string][]=[["healthy",count("healthy"),"checks:healthy"],["transient",oneOff.length,"checks:transient"],["unknownChecks",unknown.length,"checks:unknown"]];
   const inAside=pickAside(open),incidentOf=(c:Listed)=>open.find(i=>i.checkId===c.id&&i.machine===c.machine);
   const attentionActs=(c:Listed)=>{const i=incidentOf(c);if(!i)return "";return `${i.status==="open"&&!i.remote?`<button type="button" class="sp-btn sm" data-ack="${esc(i.id)}">${t("ack")}</button>`:""}<button type="button" class="sp-btn ghost sm" data-aside="${esc(keyOf(i.id,i.machine))}">${t("viewIncident")}</button>`;};
-  return `<header class="sp-head ov-head"><div class="head-title"><h1 class="verdict">${dot?`<span class="sp-dot ${dot}" aria-hidden="true"></span>`:`<span class="sp-dot none" aria-hidden="true"></span>`}${esc(headline)}</h1>
-<div class="head-stats">${stats.map(([k,n,go])=>`<button type="button" class="sp-stat hs" data-goto="${go}"><span class="sp-unit">${t(k)}</span><b>${n}</b></button>`).join("")}</div></div>
-<p class="sp-head-sub">${esc(scanLine())}</p></header>
-<div class="sp-toolbar head-acts">${actions(!!inAside)}</div>
+  const signals=[{k:"oneoff",label:t("oneOffTitle"),n:oneOff.length+clean.length,more:oneOff.length>6?viewAll("checks:transient"):"",body:`${rows([...oneOff.slice(0,6).map(c=>checkRow(c,{time:ago(c.failedAt??c.observedAt)})),...clean.slice(0,4).map(c=>checkRow(c,{status:"cleared",label:t("selfCleared"),time:ago(c.failedAt)}))],t("oneOffEmpty"))}<p class="foot">${t("oneOffSub")}</p>`},
+    ...(unknown.length?[{k:"unknown",label:t("unknownChecks"),n:unknown.length,more:unknown.length>5?viewAll("checks:unknown"):"",body:`${rows(unknown.slice(0,5).map(c=>checkRow(c)),"")}<p class="foot">${t("unknownSub")}</p>`}]:[])];
+  // The tab chosen by hand while it exists; else the first one with something in it.
+  const sig=signals.find(x=>x.k===signalTab)??signals.find(x=>x.n)??signals[0]!;
+  return `${head(t("overview"),scanLine(),actions(!!inAside))}
 ${offline?banner():""}
-<section class="sp-tile pad">${tileHead(t("attention"),attention.length>6?viewAll("checks:attention"):"")}${rows(attention.slice(0,6).map(c=>checkRow(c,{time:ago(c.failedAt??c.observedAt),acts:attentionActs(c),selected:!!incidentOf(c)&&incidentOf(c)===inAside})),t("attentionEmpty"),"shield")}</section>
-<section class="sp-tile pad">${tileHead(`${t("oneOffTitle")}${oneOff.length+clean.length?` <span class="n">${oneOff.length+clean.length}</span>`:""}`,oneOff.length>6?viewAll("checks:transient"):"")}${rows([...oneOff.slice(0,6).map(c=>checkRow(c,{time:ago(c.failedAt??c.observedAt)})),...clean.slice(0,4).map(c=>checkRow(c,{status:"cleared",label:t("selfCleared"),time:ago(c.failedAt)}))],t("oneOffEmpty"))}<p class="foot">${t("oneOffSub")}</p></section>
-${unknown.length?`<section class="sp-tile pad">${tileHead(`${t("unknownChecks")} <span class="n">${unknown.length}</span>`,unknown.length>5?viewAll("checks:unknown"):"")}${rows(unknown.slice(0,5).map(c=>checkRow(c)),"")}<p class="foot">${t("unknownSub")}</p></section>`:""}
-${resourcesTile(snapshots)}
-<section class="sp-tile pad">${tileHead(t("recentActivity"))}<div class="scan-history">${history.length?history.map(h=>{const total=Math.max(1,h.passing+h.failing+h.unknown+(h.transient??0));return `<button type="button" data-scan="${esc(h.at)}" data-host="${esc(historyHost)}" title="${esc(date(h.at))} · ${h.passing}/${total}" aria-label="${t("scanAt")} ${esc(date(h.at))}" class="scan-bar ${h.failing?"fail":h.transient?"oneoff":h.unknown?"unknown":""}" style="--h:${Math.max(10,100*h.passing/total)}%"></button>`;}).join(""):`<p class="sp-hint">${t("noHistory")}</p>`}</div>
+<section class="sp-tile hero"><div class="hero-top"><h2 class="verdict">${dot?`<span class="sp-dot ${dot}" aria-hidden="true"></span>`:`<span class="sp-dot none" aria-hidden="true"></span>`}${esc(headline)}</h2>
+<div class="head-stats">${stats.map(([k,n,go])=>`<button type="button" class="hs" data-goto="${go}"><span class="sp-unit">${t(k)}</span><b>${n}</b></button>`).join("")}</div></div>
+<div class="hero-chart">${tileHead(t("recentActivity"))}<div class="scan-history">${history.length?history.map(h=>{const total=Math.max(1,h.passing+h.failing+h.unknown+(h.transient??0));return `<button type="button" data-scan="${esc(h.at)}" data-host="${esc(historyHost)}" title="${esc(date(h.at))} · ${h.passing}/${total}" aria-label="${t("scanAt")} ${esc(date(h.at))}" class="scan-bar ${h.failing?"fail":h.transient?"oneoff":h.unknown?"unknown":""}" style="--h:${Math.max(10,100*h.passing/total)}%"></button>`;}).join(""):`<p class="sp-hint">${t("noHistory")}</p>`}</div>
 <div class="history-axis"><span>${history[0]?ago(history[0].at):"—"}</span><span class="scan-legend"><span><span class="sp-dot"></span>${t("scanOk")}</span><span><span class="sp-dot warn"></span>${t("scanOneOff")}</span><span><span class="sp-dot bad"></span>${t("scanFail")}</span><span><span class="sp-dot none"></span>${t("scanUnknown")}</span></span><span>${t("historyHint")}</span></div></section>
+<section class="sp-tile pad">${tileHead(t("attention"),attention.length>6?viewAll("checks:attention"):"")}${rows(attention.slice(0,6).map(c=>checkRow(c,{time:ago(c.failedAt??c.observedAt),acts:attentionActs(c),selected:!!incidentOf(c)&&incidentOf(c)===inAside})),t("attentionEmpty"),"shield")}</section>
+${sectionHead(t("watching"),t("watchingSub"))}
+<section class="sp-tile pad"><div class="tabs-h"><div class="tabs" role="tablist" aria-label="${t("watching")}">${signals.map(x=>`<button type="button" role="tab" aria-selected="${x===sig}" data-signal="${x.k}">${x.label}<span class="n">${x.n}</span></button>`).join("")}</div>${sig.more}</div><div role="tabpanel">${sig.body}</div></section>
+${sectionHead(t("machines"),t("machinesSub"))}
+${resourcesTile(snapshots)}
 <div class="sp-banner coverage">${icon("shield")}<div class="grow"><strong>${t("coverageTitle")}</strong><p>${t("coverageDesc")}</p></div><button type="button" class="sp-btn sm" id="coverage-new">${icon("plus")}${t("newCheck")}</button></div>`;
 }
 /** Bytes in GB (or MB under one GB), one decimal. */
@@ -355,6 +363,7 @@ function bind(){
   click("[data-page]",el=>navigate(el.dataset.page!));
   click("[data-goto]",el=>{const [p,f]=el.dataset.goto!.split(":");navigate(p!,f);});
   click("[data-machine]",el=>{machine=machine===el.dataset.machine&&el.tagName==="TR"?"all":el.dataset.machine!;closeDrawers();render();});
+  click("[data-signal]",el=>{signalTab=el.dataset.signal!;try{localStorage.setItem("ops-signal-tab",signalTab);}catch{/* private window */}render();});
   click("[data-filter]",el=>{filter=el.dataset.filter!;render();});
   click("[data-check]",el=>void showCheck(el.dataset.check!,el.dataset.host!));
   click("[data-incident]",(el,e)=>{e.stopPropagation();showIncident(el.dataset.incident!,el.dataset.host!);});
