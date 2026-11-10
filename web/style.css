@@ -140,7 +140,7 @@
 /* ---- recent observations: one bar per completed scan, its height the passing share */
 .scan-history { display:flex;gap:4px;height:56px;align-items:flex-end }
 .scan-bar { flex:1;max-width:8px;min-width:3px;height:100%;padding:0;border:0;border-radius:var(--r-mark);background:var(--well);position:relative;overflow:hidden }
-.scan-bar::after { content:"";position:absolute;inset:auto 0 0;height:var(--h);background:var(--bar-fill);border-radius:var(--r-mark) }
+.scan-bar::after { content:"";position:absolute;inset:auto 0 0;height:var(--h);background:var(--ok);border-radius:var(--r-mark) }
 .scan-bar.oneoff::after { background:var(--warn) }
 .scan-bar.fail::after { background:var(--bad) }
 .scan-bar.unknown::after { background:var(--rule-strong) }
@@ -220,7 +220,7 @@ dialog.ops-dlg.inspector { margin:12px 12px 12px auto;width:min(100% - 24px, 480
 .evidence p { color:var(--body);overflow-wrap:anywhere }
 .probe-history { display:flex;flex-wrap:wrap;align-items:center;gap:3px }
 .probe { width:5px;height:22px;border-radius:var(--r-pill);background:var(--pill) }
-.probe.pass { background:var(--bar-fill) }
+.probe.pass { background:var(--ok) }
 .probe.fail { background:var(--bad) }
 .probe-key { flex-basis:100%;margin-top:6px;font-size:12px;color:var(--muted) }
 .policy { display:flex;flex-direction:column;gap:8px }
