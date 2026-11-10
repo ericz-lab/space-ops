@@ -23,7 +23,7 @@ const engine=new Engine(store,{api:spaceApi,machine:process.env.SPACE_NAME||host
 store.interruptReports();
 const diagnosis=new Diagnosis(engine,{logsCommand:process.env.OPS_LOGS_COMMAND?.trim()||undefined});
 const handler=api(engine,diagnosis);
-const server=Bun.serve({hostname:"127.0.0.1",port:Number(process.env.PORT??8998),maxRequestBodySize:32768,routes:{"/":page,"/icon.svg":()=>new Response(Bun.file(join(import.meta.dir,"../icon.svg"))),"/healthz":handler,"/api/*":handler},fetch:()=>new Response("Not found",{status:404}),development:process.env.SPACE_DEV==="1"});
+const server=Bun.serve({hostname:"127.0.0.1",port:Number(process.env.PORT??8998),maxRequestBodySize:32768,routes:{"/":page,"/icon.png":()=>new Response(Bun.file(join(import.meta.dir,"../icon.png"))),"/healthz":handler,"/api/*":handler},fetch:()=>new Response("Not found",{status:404}),development:process.env.SPACE_DEV==="1"});
 engine.start();
 console.log(`Space Ops listening on ${server.url}`);
 process.on("SIGTERM",()=>{engine.stop();server.stop(true);store.db.close();process.exit(0);});
