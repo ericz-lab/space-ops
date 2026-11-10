@@ -36,3 +36,7 @@ Live since 2026-10-01 on both hosts. Seoul's entry is https://space-ops.example.
 ## Usage measurement
 
 App pages load `/_space/usage.js` at runtime through the Space router. It records visible, recently active time without page content or credentials. Refresh existing tabs after deployment; earlier unmeasured time cannot be recovered. Direct-port access has no Space heartbeat endpoint. `usage.test.ts` checks every application page loader; run it with `bun test usage.test.ts`.
+
+## Installation package
+
+`bun run pack [-- --out DIR]` builds `<name>-<version>.spaceapp` (ai-space docs/app-packages.md) from this tree without changing it; `scripts/pack.ts` explains how. `space.yaml` stays spec 1 for the git deployment; the package's spec-2 manifest is made from it, with `version` from `package.json` and the files, launch mode and offline notes from `spacePackage` there. A package runs on a port ai-space assigns: nothing may assume the manifest's port (the package's entry writes the assigned one to `<data dir>/service.port`). Machine settings of a package install go in `<workspace>/data/<app>/.env`. Bump `version` for each package released; install with `space app install`, upgrade with `space app upgrade`. A machine is served by the git deployment or by a package, never both.
