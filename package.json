@@ -1,5 +1,5 @@
 {
-  "name": "space-ops", "version": "0.1.0", "private": true, "type": "module",
+  "name": "space-ops", "version": "0.1.0", "license": "MIT", "private": true, "type": "module",
   "scripts": { "start": "bun src/index.ts", "dev": "bun --hot src/index.ts", "inspect": "bun src/inspect.ts", "typecheck": "tsc --noEmit", "test": "bun test", "pack": "bun scripts/pack.ts", "check": "bun install --frozen-lockfile && bun run typecheck && bun test" },
   "devDependencies": { "@types/bun": "1.4.0", "typescript": "5.9.3" },
   "spacePackage": {"include": ["src", "web", "icon.png", "package.json", "tsconfig.json", "agents", "skills"], "mode": "background", "offline": {"features": ["Checks, incidents and evidence of this machine"], "online": ["Peer machines", "AI diagnosis"]}}

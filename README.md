@@ -2,6 +2,8 @@
 
 A general-purpose operations center for ai-space. Independent collectors discover services and scheduled tasks, run reusable HTTP/JSON checks, record evidence, and track incidents through recovery. One interface, on the Space Tiles kit shared by ai-space's built-in apps, shows the local machine and its peers.
 
+> **Works best with [ai-space](https://github.com/ericz-lab/ai-space) · 配合 ai-space 使用效果更佳.** Space Ops is an ai-space app: it discovers services, scheduled tasks, declared checks and peers through the Space API, and the space gives it its database, panel widget, the model behind one-click diagnosis, and notifications. Without a space only the host resources and the HTTP/JSON rules you write yourself have something to watch.
+
 ## Run
 
 ```sh
@@ -124,3 +126,7 @@ Set up the public Access policy before registering the app (the wildcard router 
 ### Recovery after completion outside the scheduler
 
 An HTTP rule can explicitly map to a local task using `recoveryTaskId` and `evidenceTimestampPath` (for example `$.latest.finishedAt`). It must contain success assertions. A fresh, enabled, passing rule with a valid completion timestamp **newer than** the task's failed/skipped execution supplies recovery evidence. Normal consecutive-pass thresholds then close the incident and keep the evidence in its history. A newer task failure invalidates older completion evidence. Unreachable, paused, failed, expired or invalid evidence cannot recover a task; overdue and stalled checks cannot be overridden. Running alone is unknown, not recovery. This mapping is configuration, with no app-specific logic in the collector.
+
+## License
+
+[MIT](LICENSE)
