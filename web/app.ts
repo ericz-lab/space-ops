@@ -56,7 +56,8 @@ let toastTimer:ReturnType<typeof setTimeout>|undefined;
 function toast(message:string,error=false){const el=document.querySelector<HTMLElement>("#toast")!;el.textContent=message;el.classList.toggle("err",error);el.classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove("show"),3000);}
 let reportPoll:ReturnType<typeof setTimeout>|undefined,openReport:string|null=null;
 const diagnosing=()=>data?.reports?.find(r=>r.status==="running");
-async function load(){if(refreshPending)return;refreshPending=true;const before=diagnosing()?.id;try{data=await request("/api/dashboard");offline=false;}catch{offline=true;}finally{refreshPending=false;}
+async function load(){if(refreshPending)return;refreshPending=true;const before=diagnosing()?.id,scanning=!!data?.busy;try{data=await request("/api/dashboard");offline=false;}catch{offline=true;}finally{refreshPending=false;}
+  if(scanning&&data&&!data.busy&&!offline&&!checks().some(c=>matches(c,"attention")))tickChecks=true;
   // While a diagnosis runs, follow it every few seconds; an open dialog of it is redrawn when it ends.
   clearTimeout(reportPoll);if(diagnosing())reportPoll=setTimeout(()=>void load(),4000);
   if(before&&!diagnosing()){const done=data?.reports?.find(r=>r.id===before);if(done)toast(t(done.status==="done"?"diagnoseDone":"diagnoseFailed"),done.status!=="done");if(openReport===before&&document.querySelector("dialog[open]"))void showReport(before);}
@@ -87,31 +88,105 @@ function render(){
   document.documentElement.lang=lang==="zh"?"zh-CN":"en";
   const body=!data?`${head(t(page as Key),pageSub())}${offline?banner():""}<section class="sp-tile"><div class="sp-state"><span class="ico">${icon("refresh")}</span><h2>${t("noData")}</h2></div></section>`
     :page==="overview"?overview():page==="room"?roomPage():page==="checks"?checksPage():page==="inspections"?inspectionPage():page==="incidents"?incidentPage():page==="reports"?reportsPage():settingsPage();
-  root.innerHTML=`<div class="sp-app">${side(open.length)}<div class="sp-work ${aside?"has-aside":""}"><main class="sp-center" id="main">
+  root.innerHTML=`<div class="sp-app">${side(open.length,open.filter(i=>i.status==="open").length)}<div class="sp-work ${aside?"has-aside":""}"><main class="sp-center" id="main">
 <div class="sp-mbar"><button type="button" class="sp-icon-btn" data-nav-open aria-label="${t("mobileMenu")}">${icon("menu")}</button><strong>${t(page as Key)}</strong>${aside?`<button type="button" class="sp-icon-btn" data-aside-open aria-label="${t("incidents")}">${icon("bell")}</button>`:""}</div>
 ${body}<p class="foot app-foot">Space Ops · ${esc(data?.local.machine??"")} · ${esc(Intl.DateTimeFormat().resolvedOptions().timeZone)}</p></main>${aside?asidePanel(aside,open):""}</div></div>`;
   if(!aside)document.body.classList.remove("sp-open-aside");
   if(!document.body.classList.contains("sp-open-nav")&&!document.body.classList.contains("sp-open-aside"))document.body.classList.remove("sp-sheet-open");
   [".sp-side-scroll",".sp-aside-body"].forEach((s,i)=>{const el=root.querySelector(s);if(el)el.scrollTop=scrolls[i]!;});
+  watchSide();placeInd();
+  if(data)numsStill=false;
   bind();
 }
 function pageSub(){return t(page==="overview"?"subtitle":page==="room"?"roomSub":page==="checks"?"checksSub":page==="inspections"?"inspectionsSub":page==="incidents"?"incidentsSub":page==="reports"?"reportsSub":"settingsSub");}
-function side(active:number){
-  const machines=data?[{name:data.local.machine,local:true,ok:localFresh()},...data.peers.map(p=>({name:p.name,local:false,ok:p.status==="healthy"}))]:[];
+/** Line icons of the views; only Overview, the "now" of the app, keeps the accent when it is not selected. Checks' tick draws itself when a scan ends clean. */
+const viewIcons:Record<string,string>={overview:paths.pulse!,checks:'<path d="M12 2.5 19.5 5.5v6c0 5-3.4 8.6-7.5 10-4.1-1.4-7.5-5-7.5-10v-6z"/><path class="tick" pathLength="1" d="m8.5 12 2.5 2.5 4.5-5"/>',incidents:paths.bell!,inspections:paths.clipboard!,
+  room:'<rect x="4" y="3.5" width="16" height="7" rx="1.5"/><rect x="4" y="13.5" width="16" height="7" rx="1.5"/><path d="M7.5 7h.01M7.5 17h.01M11 7h5.5M11 17h5.5"/>',reports:paths.doc!,
+  settings:'<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  layers:'<path d="m12 4 8.5 4.5L12 13 3.5 8.5Z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/><path d="m3.5 16.5 8.5 4.5 8.5-4.5"/>'};
+const navIcon=(name:string)=>`<svg class="ic ni" viewBox="0 0 24 24" aria-hidden="true">${viewIcons[name]}</svg>`;
+const chev=`<svg class="ic chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>`;
+/** A machine's dot breathes only while it runs something: a scan (this machine), or a diagnosis reading its evidence. */
+const machineBusy=(name:string,local:boolean)=>(local&&!!data?.busy)||!!data?.reports?.some(r=>r.status==="running"&&(r.machines??[r.machine]).includes(name));
+
+/**
+ * A count that rolls one line when its number changes: the old one leaves upward as the new one follows it in
+ * (downward for a smaller number). The page is redrawn whole and often, so a roll under way is resumed at the
+ * point it had reached (`--roll-at`), not started again. Numbers that change because another machine was chosen
+ * (or the first data arrived) are set without a roll: `numsStill`.
+ */
+const ROLL_MS=200;
+const nums=new Map<string,{v:number;prev:number;at:number}>();
+let numsStill=true;
+function numHtml(key:string,v:number){
+  const now=performance.now();let s=nums.get(key);
+  if(!s)nums.set(key,s={v,prev:v,at:-ROLL_MS});
+  else if(s.v!==v)nums.set(key,s={v,prev:s.v,at:numsStill?-ROLL_MS:now});
+  if(!v)return "";
+  const gone=now-s.at;
+  if(gone>=ROLL_MS)return `<span class="cnum"><span>${v}</span></span>`;
+  return `<span class="cnum roll${v<s.prev?" down":""}" data-prev="${s.prev||""}" style="--roll-at:-${Math.round(gone)}ms"><span>${v}</span></span>`;
+}
+/** Set when a scan this page saw running ends with nothing needing attention: the next drawing of Checks' tick plays once. */
+let tickChecks=false;
+/** Folded groups of the left column, kept in this browser. */
+const FOLD_KEY="ops-side-folded";
+let folded:string[]=(()=>{try{const v:unknown=JSON.parse(localStorage.getItem(FOLD_KEY)??"[]");return Array.isArray(v)?v.filter((x):x is string=>typeof x==="string"):[];}catch{return [];}})();
+function side(active:number,unacked:number){
+  const fresh=localFresh();
+  const machines=data?[{name:data.local.machine,local:true,state:fresh?"on":"bad",word:t(fresh?"mOnline":"mNotScanning"),why:fresh?"":t(offline?"disconnected":"stale")},...data.peers.map(p=>{const on=p.status==="healthy";return {name:p.name,local:false,state:on?"on":"off",word:t(on?"mOnline":"staleShort"),why:on?"":p.error??t("stale")};})]:[];
   const late=inspections().filter(i=>i.state==="late").length,total=checks().length;
   const counts:Record<string,number>={checks:total,incidents:active,inspections:late};
-  const mode=document.documentElement.dataset.mode??"system",live=localFresh();
-  const item=(attrs:string,label:string,trail="")=>`<li><button type="button" class="sp-nitem" ${attrs}><span class="ni-label">${label}</span>${trail}</button></li>`;
+  const mode=document.documentElement.dataset.mode??"system",live=fresh;
+  const group=(key:string,label:string,body:string)=>{const closed=folded.includes(key);return `<div class="sp-ngroup${closed?" closed":""}" data-group="${key}"><button type="button" class="sp-nlabel ng-toggle" id="g-${key}" aria-expanded="${!closed}" aria-controls="ng-${key}"><span>${label}</span>${chev}</button><div class="ng-body" id="ng-${key}"${closed?" inert":""}><ul aria-labelledby="g-${key}">${body}</ul></div></div>`;};
+  // Incidents wears a pill, red while one is not yet acknowledged; the other counts stay quiet grey.
+  const count=(p:string)=>{const n=counts[p]??0,cls=p==="incidents"?` pill${unacked?" bad-pill":""}`:"",title=p==="incidents"&&unacked?` title="${esc(tn("unacked",unacked))}"`:"";return `<span class="sp-nc${cls}"${title}>${numHtml(`v:${p}`,n)}</span>`;};
+  const machineRows=`<li><button type="button" class="sp-nitem" data-machine="all" aria-pressed="${machine==="all"}">${navIcon("layers")}<span class="nl">${t("allMachines")}</span></button></li>`+machines.map(m=>`<li><button type="button" class="sp-nitem" data-machine="${esc(m.name)}" aria-pressed="${machine===m.name}"${m.why?` title="${esc(m.why)}"`:""}><span class="mdot ${m.state}${machineBusy(m.name,m.local)?" busy":""}" role="img" aria-label="${esc(m.word)}"><i></i></span><span class="nl mname"><span class="nm">${esc(m.name)}</span>${m.local?`<span class="mtag">${t("local")}</span>`:""}</span>${m.state==="on"?"":`<span class="sp-nc ${m.state}">${esc(m.word)}</span>`}</button></li>`).join("");
   return `<nav class="sp-tile sp-side" aria-label="Space Ops">
 <div class="sp-brand"><img class="brand-logo" src="/icon.png" alt=""><div class="sp-brand-txt"><strong>Space Ops</strong><span class="sp-brand-sub"><span class="live"><span class="sp-dot ${live?"ok":offline?"bad":"warn"}"></span>${t(live?"live":"disconnected")}</span></span></div><button type="button" class="sp-icon-btn sp-side-close" data-drawer-close aria-label="${t("closeNav")}">${icon("close")}</button></div>
 <div class="sp-search" role="search">${icon("search")}<input id="q" type="search" value="${esc(query)}" placeholder="${t("search")}" aria-label="${t("search")}" autocomplete="off"><span class="sp-kbd" aria-hidden="true">/</span></div>
-<div class="sp-side-scroll">
-<div class="sp-ngroup"><div class="sp-nlabel" id="g-machines">${t("machines")}</div><ul aria-labelledby="g-machines">${item(`data-machine="all" aria-pressed="${machine==="all"}"`,t("allMachines"))}${machines.map(m=>item(`data-machine="${esc(m.name)}" aria-pressed="${machine===m.name}"`,`${esc(m.name)}${m.local?` <span class="sp-nc">${t("local")}</span>`:""}`,m.ok?"":`<span class="sp-nc stale-word"><span class="sp-dot warn"></span>${t("staleShort")}</span>`)).join("")}</ul></div>
-<div class="sp-ngroup"><div class="sp-nlabel" id="g-views">${t("navView")}</div><ul aria-labelledby="g-views">${PAGES.map(p=>item(`data-page="${p}" ${page===p?'aria-current="page"':""}`,t(p),counts[p]?`<span class="sp-nc">${counts[p]}</span>`:"")).join("")}</ul></div>
+<div class="sp-side-scroll"><div class="nav-ind snap" aria-hidden="true"></div>
+${group("machines",t("machines"),machineRows)}
+${group("views",t("navView"),PAGES.map(p=>`<li><button type="button" class="sp-nitem" data-page="${p}" ${page===p?'aria-current="page"':""}>${navIcon(p)}<span class="nl">${t(p)}</span>${count(p)}</button></li>`).join(""))}
 </div>
 <div class="sp-side-foot"><div class="sp-seg sm" role="group" aria-label="${t("language")}"><button type="button" data-lang="zh" lang="zh" aria-pressed="${lang==="zh"}">中</button><button type="button" data-lang="en" lang="en" aria-pressed="${lang==="en"}">EN</button></div>
 <button type="button" class="sp-icon-btn" id="theme-cycle" title="${esc(t("themeCycle").replace("{m}",t(mode as Key)))}" aria-label="${esc(t("themeCycle").replace("{m}",t(mode as Key)))}">${icon(mode==="light"?"sun":mode==="dark"?"moon":"auto")}</button></div>
 </nav>`;
+}
+
+/**
+ * The wash behind the open view: one element that slides from the row left to the row chosen. The page is
+ * redrawn whole, so the box it last stood on (`indBox`) is where a new one starts from; machines (the scope)
+ * and a view in a folded group take none. Without the script the kit's rule still marks the row.
+ */
+let indBox:{x:number;y:number;w:number;h:number}|null=null;
+function placeInd(slide=true){
+  const scroll=root.querySelector<HTMLElement>(".sp-side-scroll"),ind=scroll?.querySelector<HTMLElement>(".nav-ind");if(!scroll||!ind)return;
+  const row=scroll.querySelector<HTMLElement>('.sp-nitem[aria-current="page"]');
+  scroll.querySelectorAll(".ind-on").forEach(x=>{if(x!==row)x.classList.remove("ind-on");});
+  const box=row?.getBoundingClientRect();
+  if(!row||!box||box.height<8||row.closest(".sp-ngroup.closed")){row?.classList.remove("ind-on");ind.classList.add("snap");ind.style.opacity="0";indBox=null;return;}
+  const home=scroll.getBoundingClientRect();
+  const to={x:box.left-home.left+scroll.scrollLeft,y:box.top-home.top+scroll.scrollTop,w:box.width,h:box.height};
+  const put=(b:typeof to)=>{ind.style.width=`${b.w}px`;ind.style.height=`${b.h}px`;ind.style.transform=`translate(${b.x}px, ${b.y}px)`;ind.style.opacity="1";};
+  const same=(a:typeof to|null)=>!!a&&a.x===to.x&&a.y===to.y&&a.w===to.w&&a.h===to.h;
+  if(ind.style.opacity==="1"&&same(indBox))return;
+  // A fresh element starts on the old box and slides from there; the first placing, and one that follows a layout change (a group folding, a resize), does not slide.
+  if(slide&&indBox&&ind.style.opacity!=="1"){ind.classList.add("snap");put(indBox);void ind.offsetWidth;}
+  ind.classList.toggle("snap",!slide||!indBox);
+  put(to);indBox=to;row.classList.add("ind-on");
+}
+// Rows move when a group folds, a list above grows or the column is resized: the wash keeps to its row.
+const navWatch=new ResizeObserver(()=>placeInd(false));
+function watchSide(){
+  navWatch.disconnect();
+  const scroll=root.querySelector<HTMLElement>(".sp-side-scroll");if(!scroll)return;
+  navWatch.observe(scroll);scroll.querySelectorAll(".sp-ngroup").forEach(g=>navWatch.observe(g));
+  // Folding a group: its label is the switch; the group's body eases shut without the page being redrawn.
+  scroll.querySelectorAll<HTMLElement>(".sp-ngroup[data-group]").forEach(g=>{const key=g.dataset.group!;g.querySelector<HTMLElement>(".ng-toggle")!.onclick=()=>{
+    const closed=!g.classList.contains("closed");g.classList.toggle("closed",closed);g.querySelector(".ng-toggle")!.setAttribute("aria-expanded",String(!closed));g.querySelector<HTMLElement>(".ng-body")!.inert=closed;
+    folded=closed?[...folded,key]:folded.filter(x=>x!==key);try{localStorage.setItem(FOLD_KEY,JSON.stringify(folded));}catch{/* private mode */}};});
+  if(tickChecks){tickChecks=false;scroll.querySelector(".tick")?.classList.add("draw");}
 }
 function banner(){return `<div class="sp-banner warn" role="alert">${icon("warn")}<span class="grow">${t("loadFailed")}</span></div>`;}
 /** The main action of every view: run checks now (the screen's one ink button), then the quiet ones. */
@@ -358,11 +433,11 @@ async function act(fn:()=>Promise<void>){try{await fn();}catch(e){toast((e as Er
 function setTheme(mode:string){const d=document.documentElement;d.dataset.mode=mode;try{if(mode==="system")localStorage.removeItem("ops-theme");else localStorage.setItem("ops-theme",mode);}catch{/* the choice lasts for this page only */}if(mode==="light"||mode==="dark")d.dataset.theme=mode;else delete d.dataset.theme;themeColor();}
 function themeColor(){const m=document.documentElement.dataset.mode,dark=m==="dark"||(m!=="light"&&matchMedia("(prefers-color-scheme: dark)").matches);document.querySelector('meta[name="theme-color"]')?.setAttribute("content",dark?"#121212":"#f3f3f3");}
 function bind(){
-  bindRoom(root,name=>{machine=name;navigate("overview");});
+  bindRoom(root,name=>{numsStill=true;machine=name;navigate("overview");});
   const click=(sel:string,fn:(el:HTMLElement,e:MouseEvent)=>void)=>root.querySelectorAll<HTMLElement>(sel).forEach(el=>el.addEventListener("click",e=>fn(el,e)));
   click("[data-page]",el=>navigate(el.dataset.page!));
   click("[data-goto]",el=>{const [p,f]=el.dataset.goto!.split(":");navigate(p!,f);});
-  click("[data-machine]",el=>{machine=machine===el.dataset.machine&&el.tagName==="TR"?"all":el.dataset.machine!;closeDrawers();render();});
+  click("[data-machine]",el=>{numsStill=true;machine=machine===el.dataset.machine&&el.tagName==="TR"?"all":el.dataset.machine!;closeDrawers();render();});
   click("[data-signal]",el=>{signalTab=el.dataset.signal!;try{localStorage.setItem("ops-signal-tab",signalTab);}catch{/* private window */}render();});
   click("[data-filter]",el=>{filter=el.dataset.filter!;render();});
   click("[data-check]",el=>void showCheck(el.dataset.check!,el.dataset.host!));
