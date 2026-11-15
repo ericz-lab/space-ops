@@ -62,17 +62,19 @@ export class Engine {
       source("peers", async () => {
         const d = await get("/api/peers"); if (!Array.isArray(d.peers)) throw new Error("Invalid peers response");
         const peers: { name:string; url:string }[] = d.peers.map((p:{name:string})=>({name:p.name,url:`${this.config.api}/api/peers/${encodeURIComponent(p.name)}/apps/space-ops/proxy/api/snapshot`}));
+        // Why Space itself cannot reach a peer (its last refresh's error, such as a tunnel with no connector): the likeliest cause when the snapshot read fails too.
+        const spaceSays = new Map<string,string>((d.peers as {name:string;error?:unknown}[]).flatMap(p=>typeof p.error==="string"&&p.error?[[p.name,p.error.slice(0,200)] as [string,string]]:[]));
         for (const peer of this.config.peers ?? []) if (!peers.some(p=>p.name===peer.name)) peers.push(peer);
         // Read every listed peer first: a newly named peer's snapshot says whether it is a known machine renamed.
-        const known = this.store.list<PeerView>("peer"), read = new Map<string, Snapshot>();
+        const known = this.store.list<PeerView>("peer"), read = new Map<string, Snapshot>(), failed = new Map<string, string>();
         await pool(peers, 3, async p => {
           try {
             const snap = await readJson(p.url,10000,this.fetcher) as Snapshot;
             if (snap.version !== 1 || !Array.isArray(snap.checks) || !Array.isArray(snap.incidents) || typeof snap.machine !== "string" || !Number.isFinite(Date.parse(snap.generatedAt))) throw new Error("Invalid snapshot");
             const lease=Number.isFinite(snap.staleAfterMs)&&snap.staleAfterMs>=60_000&&snap.staleAfterMs<=14_400_000?snap.staleAfterMs:240_000;
-            if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("Peer scan expired or clock differs");
+            if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("its last scan expired or its clock differs");
             read.set(p.name, snap);
-          } catch { /* Recorded below as unavailable. */ }
+          } catch (e) { failed.set(p.name, readFailure(e)); /* Recorded below as unavailable. */ }
         });
         // The list answered, so a peer it no longer names was renamed or removed: a rename carries the machine's data over, a removal retires it.
         // A rename can only land on a peer never read before (`fresh`): one already read is a machine of its own.
@@ -92,8 +94,9 @@ export class Engine {
             this.store.put("peer",p.name,{name:p.name,url:p.url,status:"healthy",snapshot:snap,receivedAt:new Date().toISOString()} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"pass",code:"peer_ok",detail:"Peer collector is reporting fresh observations"});
           } else {
-            this.store.put("peer",p.name,{name:p.name,url:p.url,status:"unknown",error:"Peer collector is unavailable or its snapshot expired",snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
-            observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",code:"peer_unavailable",detail:"Peer collector is unavailable or its snapshot expired"});
+            const detail = peerFailure(spaceSays.get(p.name) ?? failed.get(p.name), prev?.receivedAt ?? null);
+            this.store.put("peer",p.name,{name:p.name,url:p.url,status:"unknown",error:detail,snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
+            observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",code:"peer_unavailable",detail});
           }
         }
       }),
@@ -138,6 +141,22 @@ export class Engine {
       }
     }
   }
+}
+/** Why a peer's snapshot could not be read, in a few words; for a refused read the proxy's status is all there is. */
+function readFailure(e: unknown): string {
+  const err = e as Error;
+  if (err?.name === "TimeoutError") return "no answer within 10 s";
+  const m = String(err?.message ?? e);
+  return /^HTTP \d+$/.test(m) ? `snapshot read failed (${m})` : m === "Invalid snapshot" ? "invalid snapshot" : m.slice(0, 200);
+}
+/**
+ * The peer check's failure text: the reason, Space's own first (it names a tunnel with no connector), and when the
+ * last good snapshot arrived. An instant, not an age, so the text stays the same scan after scan and an open
+ * incident gains an event only when the reason changes.
+ */
+export function peerFailure(reason: string | undefined, receivedAt: string | null): string {
+  const last = receivedAt && Number.isFinite(Date.parse(receivedAt)) ? `last snapshot ${new Date(receivedAt).toISOString().slice(0, 16)}Z` : "no snapshot received yet";
+  return `Peer collector is unavailable: ${reason || "its snapshot expired"}; ${last}`;
 }
 /** How long a peer the Space list stopped naming waits for an unread new peer to say whether it is the same machine. */
 export const RENAME_WAIT_MS = 86_400_000;

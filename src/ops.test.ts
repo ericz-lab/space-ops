@@ -137,6 +137,25 @@ describe("Collector and API",()=>{
     const e=engine(s,mockFetch(url=>{if(url.includes("/proxy/")){if(!online)throw new Error("offline");return{version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),checks:[],incidents:[],history:[]};}return url.endsWith("services")?{services:[]}:url.endsWith("tasks")?{tasks:[]}:{peers:[{name:"remote"}]};}));
     await e.scan();expect(e.peers()[0]?.status).toBe("healthy");online=false;await e.scan();expect(e.peers()[0]?.status).toBe("unknown");expect(e.peers()[0]?.snapshot?.machine).toBe("remote");
   });
+  test("a failed peer says why, Space's reason first, and when its last snapshot arrived",async()=>{
+    const s=store();let state:{proxy:"ok"|"down"|"stale";space?:string}={proxy:"ok"};
+    const f=(async(input:RequestInfo|URL)=>{const url=String(input);
+      if(url.includes("/proxy/")){if(state.proxy==="down"||url.includes("/peers/new/"))return new Response("peer remote unreachable",{status:502});return Response.json({version:1,machine:"remote",generatedAt:new Date().toISOString(),lastScanAt:new Date(Date.now()-(state.proxy==="stale"?3600_000:0)).toISOString(),checks:[],incidents:[],history:[]});}
+      if(url.endsWith("/api/peers"))return Response.json({peers:[{name:"remote",...(state.space?{error:state.space}:{})},{name:"new",error:"token rejected"}]});
+      return Response.json(url.endsWith("services")?{services:[]}:{tasks:[]});}) as typeof fetch;
+    const e=engine(s,f),detail=()=>s.get<{detail:string}>("check","peer:remote")?.detail;
+    await e.scan();const last=`last snapshot ${s.get<{receivedAt:string}>("peer","remote")!.receivedAt.slice(0,16)}Z`;
+    state={proxy:"down",space:"tunnel not connected (Cloudflare 1033)"};await e.scan();
+    expect(detail()).toBe(`Peer collector is unavailable: tunnel not connected (Cloudflare 1033); ${last}`);
+    expect(e.peers().find(p=>p.name==="remote")?.error).toBe(detail()!);
+    expect(s.get<{detail:string}>("check","peer:new")?.detail).toBe("Peer collector is unavailable: token rejected; no snapshot received yet");
+    // The same reason reads the same scan after scan: the open incident carries it and gains no event per scan.
+    for(let i=0;i<3;i++)await e.scan();
+    const open=s.activeIncident("peer:remote")!;expect(open.detail).toBe(detail()!);const events=open.events.length;
+    await e.scan();expect(s.activeIncident("peer:remote")!.events.length).toBe(events);
+    state={proxy:"down"};await e.scan();expect(detail()).toBe(`Peer collector is unavailable: snapshot read failed (HTTP 502); ${last}`);
+    state={proxy:"stale"};await e.scan();expect(detail()).toBe(`Peer collector is unavailable: its last scan expired or its clock differs; ${last}`);
+  });
   // A fake Space: `list` names the configured peers; `machines` maps a peer name to the collector answering for it (undefined = unreachable).
   function peerSpace(){
     const state={list:[] as string[],listOk:true,machines:{} as Record<string,{machine:string;collector?:string}|undefined>};
