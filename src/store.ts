@@ -1,6 +1,8 @@
 import { Database } from "bun:sqlite";
 import { validInstant } from "./rules.ts";
-import { DEFAULT_SETTINGS, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Snapshot, type Rule } from "./types.ts";
+import { DEFAULT_SETTINGS, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerPolicy, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Severity, type Snapshot, type Rule } from "./types.ts";
+
+const RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 
 export class Store {
   readonly db: Database;
@@ -49,20 +51,33 @@ export class Store {
       } else if (incident) {
         const changed = incident.detail !== sample.detail;
         incident.updatedAt = at; incident.detail = sample.detail;
+        // An automatic incident's severity rises with its check's (a peer asleep too long) and never falls while it is open.
+        const severity = sample.severity ?? "warning", escalated = incident.source !== "manual" && sample.verdict === "fail" && RANK[severity] > RANK[incident.severity];
+        if (escalated) {
+          const from = incident.severity; incident.severity = severity;
+          incident.events.push({ at, type: "escalated", detail: `Severity raised from ${from} to ${severity}: ${sample.detail}` });
+          // Nothing was sent for an info incident: this is the first word of it.
+          this.enqueue(incident, from === "info" ? "opened" : "escalated", check, now);
+        }
         // An operator's incident stays open until an operator resolves it; the check recovering is recorded on it.
         if (status === "healthy" && incident.source === "manual") { if (incident.events.at(-1)?.type !== "recovered") incident.events.push({ at, type: "recovered", detail: sample.detail }); }
         else if (status === "healthy") { incident.status = "resolved"; incident.resolvedAt = at; incident.resolvedBy = "check"; incident.events.push({ at, type: "resolved", detail: sample.detail }); this.enqueue(incident, "resolved", check, now); }
-        else if (changed || incident.events.at(-1)?.type === "recovered") incident.events.push({ at, type: "observed", detail: sample.detail });
+        else if (!escalated && (changed || incident.events.at(-1)?.type === "recovered")) incident.events.push({ at, type: "observed", detail: sample.detail });
         incident.events = trimEvents(incident.events);
         this.put("incident", incident.id, incident);
       }
       return check;
     })();
   }
+  /**
+   * Queue one transition for the Space default channel, at a Space notify level: `alert` for a critical incident,
+   * `warn` for a warning, `success` for a recovery. An info incident asks nothing of anyone: neither it nor its
+   * recovery is sent.
+   */
   enqueue(i: Incident, type: string, c: Check, now: number) {
-    if (!this.settings().notifications || (c.mutedUntil && Date.parse(c.mutedUntil) > now)) return;
+    if (i.severity === "info" || !this.settings().notifications || (c.mutedUntil && Date.parse(c.mutedUntil) > now)) return;
     const id = `${i.id}:${type}`;
-    this.db.query("INSERT OR IGNORE INTO outbox(id,body,next_at) VALUES(?,?,?)").run(id, JSON.stringify({ title: `${type === "resolved" ? "Recovered" : "Incident"}: ${i.name}`, text: i.detail, level: type === "resolved" ? "success" : "error", key: id }), now);
+    this.db.query("INSERT OR IGNORE INTO outbox(id,body,next_at) VALUES(?,?,?)").run(id, JSON.stringify({ title: `${type === "resolved" ? "Recovered" : "Incident"}: ${i.name}`, text: i.detail, level: type === "resolved" ? "success" : i.severity === "critical" ? "alert" : "warn", key: id }), now);
   }
   control(id: string, patch: { enabled?: boolean; mutedUntil?: string | null }, now = Date.now()) {
     const c = this.get<Check>("check", id); if (!c) throw new Error("Check not found");
@@ -139,7 +154,7 @@ export class Store {
   /**
    * A peer renamed from `from` to `to`: everything this collector keys by the peer's name follows it, so the
    * machine keeps its history instead of starting again. The peer view, the peer check, its pause/mute
-   * control, its observations, its incidents (an open one gets a "renamed" event) and the targets of past
+   * control, its peer policy (may sleep), its observations, its incidents (an open one gets a "renamed" event) and the targets of past
    * diagnosis reports. What `to` already holds wins over `from`; a report's text stays as written.
    */
   renamePeer(from: string, to: string, now = Date.now(), detail = `Peer renamed from ${from} to ${to}`) {
@@ -157,6 +172,8 @@ export class Store {
       }
       const oldControl = this.get<object>("control", oldId);
       if (oldControl) { this.put("control", newId, { ...oldControl, ...this.get<object>("control", newId) }); this.drop("control", oldId); }
+      const oldPolicy = this.get<PeerPolicy>("peerPolicy", from);
+      if (oldPolicy) { if (!this.get("peerPolicy", to)) this.put("peerPolicy", to, oldPolicy); this.drop("peerPolicy", from); }
       moved.observations = this.db.query("UPDATE observations SET check_id=? WHERE check_id=?").run(newId, oldId).changes;
       const open = this.activeIncident(newId);
       for (const i of this.list<Incident>("incident").filter(i => i.checkId === oldId)) {

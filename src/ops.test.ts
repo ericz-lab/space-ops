@@ -4,10 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
-import { declaredNoop, httpProbe, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
-import { Engine, renames } from "./engine.ts";
+import { declaredNoop, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
+import { Engine, peerDown, renames, tunnelClosed } from "./engine.ts";
 import { api, widget } from "./api.ts";
-import { DEFAULT_SETTINGS, type DeclaredCheck, type Sample } from "./types.ts";
+import { DEFAULT_SETTINGS, type DeclaredCheck, type PeerView, type Sample } from "./types.ts";
 import { declared, evaluate, inspect } from "./inspections.ts";
 
 const stores:Store[]=[];
@@ -16,6 +16,7 @@ function store(){const s=new Store(":memory:");stores.push(s);return s;}
 const sample:Sample={id:"one",name:"API",app:"example",kind:"http",coverage:"assertion",verdict:"fail",code:"failed",detail:"Wrong output"};
 const at=Date.parse("2026-10-01T10:00:00Z");
 const mockFetch=(fn:(url:string)=>unknown):typeof fetch=>((async(input:RequestInfo|URL)=>Response.json(fn(String(input)))) as typeof fetch);
+const outbox=(s:Store)=>(s.db.query("SELECT id,body FROM outbox ORDER BY rowid").all() as {id:string;body:string}[]).map(r=>({id:r.id,...JSON.parse(r.body) as {level:string;title:string}}));
 
 describe("Incident lifecycle",()=>{
   test("incident thresholds and history survive a collector restart",()=>{
@@ -66,6 +67,32 @@ describe("Incident lifecycle",()=>{
     s.observe({...sample,id:"three"},at);s.control("three",{mutedUntil:new Date(at+60000).toISOString()});
     s.observe({...sample,id:"three",failAfter:1},at+1);
     expect(s.db.query("SELECT * FROM outbox").all()).toHaveLength(1);
+  });
+  test("notifications carry a Space notify level: alert when critical, warn otherwise, success on recovery",()=>{
+    const s=store();s.put("settings","main",{...DEFAULT_SETTINGS,notifications:true});
+    s.observe({...sample,failAfter:1},at);s.observe({...sample,id:"two",failAfter:1,severity:"critical"},at);
+    for(const t of [1,2])s.observe({...sample,verdict:"pass",code:"ok"},at+t);
+    expect(outbox(s).map(o=>o.level)).toEqual(["warn","alert","success"]);
+  });
+  test("an info incident is recorded but never notified; rising to warning announces it once, and it never falls back",()=>{
+    const s=store();s.put("settings","main",{...DEFAULT_SETTINGS,notifications:true});
+    const asleep:Sample={...sample,id:"peer:laptop",name:"laptop",kind:"peer",failAfter:1,severity:"info",detail:"asleep"};
+    s.observe(asleep,at);s.observe(asleep,at+1);
+    const id=s.activeIncident("peer:laptop")!.id;expect(s.incident(id).severity).toBe("info");expect(outbox(s)).toHaveLength(0);
+    s.observe({...asleep,severity:"warning",detail:"asleep too long"},at+2);s.observe({...asleep,severity:"warning",detail:"asleep too long"},at+3);
+    const up=s.incident(id);expect(up.severity).toBe("warning");expect(up.events.map(e=>e.type)).toEqual(["opened","escalated"]);
+    expect(outbox(s)).toMatchObject([{id:`${id}:opened`,level:"warn",title:"Incident: laptop"}]);
+    s.observe(asleep,at+4);expect(s.incident(id).severity).toBe("warning");
+    for(const t of [5,6])s.observe({...asleep,severity:undefined,verdict:"pass",code:"ok",detail:"back"},at+t);
+    expect(s.incident(id).status).toBe("resolved");expect(outbox(s).map(o=>o.level)).toEqual(["warn","success"]);
+    // An info incident that recovers by itself sends nothing at all.
+    s.observe({...asleep,id:"peer:other"},at+7);for(const t of [8,9])s.observe({...asleep,id:"peer:other",verdict:"pass",code:"ok"},at+t);
+    expect(s.list<{checkId:string;status:string}>("incident").find(i=>i.checkId==="peer:other")?.status).toBe("resolved");expect(outbox(s)).toHaveLength(2);
+  });
+  test("an operator's incident keeps the severity the operator gave it",()=>{
+    const s=store();s.observe({...sample,severity:"info"},at);
+    const i=s.createIncident({checkId:"one",detail:"look",severity:"warning"},at+1);
+    s.observe({...sample,severity:"critical"},at+2);expect(s.incident(i.id).severity).toBe("warning");
   });
 });
 describe("Rules and assertions",()=>{
@@ -156,6 +183,63 @@ describe("Collector and API",()=>{
     state={proxy:"down"};await e.scan();expect(detail()).toBe(`Peer collector is unavailable: snapshot read failed (HTTP 502); ${last}`);
     state={proxy:"stale"};await e.scan();expect(detail()).toBe(`Peer collector is unavailable: its last scan expired or its clock differs; ${last}`);
   });
+  test("a closed tunnel reads as Space words it, through Space or through the proxy",async()=>{
+    const cf=(async()=>new Response("error code: 1033",{status:530})) as unknown as typeof fetch;
+    expect(readJson("http://x.test",1000,cf)).rejects.toThrow("HTTP 530 (Cloudflare 1033)");
+    expect(tunnelClosed("tunnel not connected (Cloudflare 1033)")).toBe(true);
+    for(const other of [undefined,"HTTP 530","HTTP 530 (Cloudflare 1016)","snapshot read failed (HTTP 502)","token rejected","no answer within 10 s"])expect(tunnelClosed(other)).toBe(false);
+  });
+  test("a peer that may sleep is info while it looks asleep, a warning after its sleep hours or for any other reason",()=>{
+    const now=at,last="2026-10-01T09:00:00.000Z",day=new Date(now-25*3600_000).toISOString(),policy={maySleep:true} as const;
+    const closed="tunnel not connected (Cloudflare 1033)",expired="its last scan expired or its clock differs";
+    // Without the policy nothing changes.
+    expect(peerDown(closed,last,null,null,now)).toEqual({code:"peer_unavailable",detail:`Peer collector is unavailable: ${closed}; last snapshot 2026-10-01T09:00Z`});
+    expect(peerDown(closed,last,policy,null,now)).toEqual({code:"peer_asleep",severity:"info",detail:`Peer collector is unavailable: ${closed}; last snapshot 2026-10-01T09:00Z; this peer may sleep, so it is info for up to 24 h`});
+    // Just woken, before its collector's first scan: still asleep; the same reading on its own is a fault.
+    expect(peerDown(expired,last,policy,{code:"peer_asleep",failedAt:last},now).severity).toBe("info");
+    expect(peerDown(expired,last,policy,{code:"peer_ok",failedAt:null},now)).toMatchObject({code:"peer_unavailable"});
+    // An open tunnel whose space does not answer, a rejected token, no answer: never asleep.
+    for(const reason of ["snapshot read failed (HTTP 502)","HTTP 502","token rejected","no answer within 10 s",undefined])expect(peerDown(reason,last,policy,{code:"peer_asleep",failedAt:last},now).severity).toBeUndefined();
+    // Asleep longer than its hours: a warning, and the text says why.
+    expect(peerDown(closed,day,policy,null,now)).toEqual({code:"peer_unavailable",severity:"warning",detail:`Peer collector is unavailable: ${closed}; last snapshot ${day.slice(0,16)}Z; down longer than the 24 h this peer may sleep`});
+    expect(peerDown(closed,day,{maySleep:true,sleepHours:48},null,now).severity).toBe("info");
+    // Never read: counted from when this failure began.
+    expect(peerDown(closed,null,policy,null,now).severity).toBe("info");
+    expect(peerDown(closed,null,policy,{code:"peer_asleep",failedAt:day},now).severity).toBe("warning");
+  });
+  test("a sleeping peer opens an info incident without a notification, and a warning once asleep too long",async()=>{
+    const s=store();let state:{proxy:"ok"|"cf"|"stale"|"down";space?:string}={proxy:"ok"};
+    const f=(async(input:RequestInfo|URL)=>{const url=String(input);
+      if(url.includes("/proxy/")){if(state.proxy==="cf")return new Response("error code: 1033",{status:530});if(state.proxy==="down")return new Response("bad gateway",{status:502});return Response.json({version:1,machine:"laptop",generatedAt:new Date().toISOString(),lastScanAt:new Date(Date.now()-(state.proxy==="stale"?3600_000:0)).toISOString(),checks:[],incidents:[],history:[]});}
+      if(url.endsWith("/api/peers"))return Response.json({peers:[{name:"laptop",...(state.space?{error:state.space}:{})}]});
+      return Response.json(url.endsWith("services")?{services:[]}:url.endsWith("checks")?{checks:[]}:{tasks:[]});}) as typeof fetch;
+    const e=engine(s,f),handler=api(e),check=()=>s.get<{status:string;code:string;severity?:string;detail:string}>("check","peer:laptop")!;
+    const put=(path:string,body:unknown)=>handler(new Request(`http://ops.test${path}`,{method:"PUT",headers:{origin:"http://ops.test","content-type":"application/json"},body:JSON.stringify(body)}));
+    await e.scan();
+    expect((await put("/api/peer-policies/nobody",{maySleep:true})).status).toBe(404);
+    expect((await put("/api/peer-policies/laptop",{maySleep:true,sleepHours:0})).status).toBe(400);
+    expect((await put("/api/peer-policies/laptop",{maySleep:"yes"})).status).toBe(400);
+    expect(await (await put("/api/peer-policies/laptop",{maySleep:true})).json()).toEqual({ok:true,policy:{maySleep:true}});
+    await e.scan();s.put("settings","main",{...DEFAULT_SETTINGS,notifications:true});
+    state={proxy:"cf",space:"tunnel not connected (Cloudflare 1033)"};for(let i=0;i<3;i++)await e.scan();
+    expect(check()).toMatchObject({status:"failing",code:"peer_asleep",severity:"info"});
+    const id=s.activeIncident("peer:laptop")!.id;expect(s.incident(id).severity).toBe("info");expect(outbox(s)).toHaveLength(0);
+    // A short wake, its collector not scanned yet; then asleep again, before Space has noticed: Cloudflare's answer through the proxy.
+    state={proxy:"stale"};await e.scan();expect(check().code).toBe("peer_asleep");
+    state={proxy:"cf"};await e.scan();expect(check()).toMatchObject({code:"peer_asleep",severity:"info"});expect(check().detail).toContain("tunnel not connected (Cloudflare 1033)");
+    expect(s.incident(id).severity).toBe("info");expect(outbox(s)).toHaveLength(0);
+    // Asleep longer than a day: the last good snapshot is older than the policy's hours.
+    s.put("peer","laptop",{...s.get<PeerView>("peer","laptop")!,receivedAt:new Date(Date.now()-25*3600_000).toISOString()});
+    state={proxy:"cf",space:"tunnel not connected (Cloudflare 1033)"};await e.scan();
+    expect(check()).toMatchObject({code:"peer_unavailable",severity:"warning"});
+    expect(s.incident(id).severity).toBe("warning");expect(s.incident(id).events.at(-1)?.type).toBe("escalated");expect(outbox(s).map(o=>o.level)).toEqual(["warn"]);
+    state={proxy:"ok"};await e.scan();await e.scan();expect(s.incident(id).status).toBe("resolved");expect(outbox(s).map(o=>o.level)).toEqual(["warn","success"]);
+    // The tunnel is up but the machine's space does not answer: a warning from the start.
+    state={proxy:"down",space:"HTTP 502"};for(let i=0;i<3;i++)await e.scan();
+    expect(s.activeIncident("peer:laptop")?.severity).toBe("warning");expect(outbox(s).map(o=>o.level)).toEqual(["warn","success","warn"]);
+    // Cleared, the peer is as before.
+    expect(await (await put("/api/peer-policies/laptop",{maySleep:false})).json()).toEqual({ok:true,policy:null});expect(s.get<object>("peerPolicy","laptop")).toBeNull();
+  });
   // A fake Space: `list` names the configured peers; `machines` maps a peer name to the collector answering for it (undefined = unreachable).
   function peerSpace(){
     const state={list:[] as string[],listOk:true,machines:{} as Record<string,{machine:string;collector?:string}|undefined>};
@@ -174,7 +258,7 @@ describe("Collector and API",()=>{
     // The machine went down for a while: an automatic incident opened on its peer check.
     state.machines={};for(let i=0;i<3;i++)await e.scan();
     const incident=s.activeIncident("peer:old-name")!;expect(incident).toBeDefined();
-    s.control("peer:old-name",{mutedUntil:"2099-01-01T00:00:00.000Z"});
+    s.control("peer:old-name",{mutedUntil:"2099-01-01T00:00:00.000Z"});s.put("peerPolicy","old-name",{maySleep:true,sleepHours:12});
     s.putReport({id:"r1",machine:"local",machines:["local","old-name"],status:"done",lang:"en",startedAt:new Date().toISOString(),finishedAt:new Date().toISOString(),targets:["local","old-name","old-name/app"],coverage:[{name:"Health checks",status:"done",detail:"",machine:"old-name"}]});
     const before=s.history("peer:old-name").length;
     // An unreadable peer list changes nothing.
@@ -186,6 +270,7 @@ describe("Collector and API",()=>{
     expect(s.history("peer:old-name")).toHaveLength(0);// One "not observed" while the list was unreadable, one pass after the rename.
     expect(s.history("peer:new-name").length).toBe(before+2);
     expect(s.get<{mutedUntil:string|null}>("check","peer:new-name")?.mutedUntil).toBe("2099-01-01T00:00:00.000Z");
+    expect(s.get("peerPolicy","old-name")).toBeNull();expect(s.get<object>("peerPolicy","new-name")).toEqual({maySleep:true,sleepHours:12});
     // The same incident, not a retired one and a new one: it recovers on the machine's new name.
     const moved=s.incident(incident.id);expect(moved.checkId).toBe("peer:new-name");expect(moved.name).toBe("new-name");expect(moved.events.some(ev=>ev.type==="renamed")).toBe(true);
     expect(s.activeIncident("peer:new-name")?.id).toBe(incident.id);await e.scan();expect(s.incident(incident.id).resolvedBy).toBe("check");
@@ -193,9 +278,9 @@ describe("Collector and API",()=>{
   });
   test("a removed peer is retired, and a new machine is not taken for it",async()=>{
     const s=store(),{state,f}=peerSpace(),e=engine(s,f);
-    state.list=["old-name"];state.machines={"old-name":{machine:"box",collector:"c-1"}};await e.scan();
+    state.list=["old-name"];state.machines={"old-name":{machine:"box",collector:"c-1"}};await e.scan();s.put("peerPolicy","old-name",{maySleep:true});
     state.list=["other"];state.machines={other:{machine:"box",collector:"c-2"}};await e.scan();
-    expect(e.peers().map(p=>p.name)).toEqual(["other"]);expect(s.get("peer","old-name")).toBeNull();expect(s.get<CheckLike>("check","peer:old-name")).toBeNull();
+    expect(e.peers().map(p=>p.name)).toEqual(["other"]);expect(s.get("peerPolicy","old-name")).toBeNull();expect(s.get("peer","old-name")).toBeNull();expect(s.get<CheckLike>("check","peer:old-name")).toBeNull();
     expect(s.history("peer:other")).toHaveLength(1);expect(s.history("peer:old-name")).toHaveLength(1);
   });
   test("a gone peer waits, unlisted, until the newly named peer can say whether it is the same machine",async()=>{
@@ -555,6 +640,16 @@ describe("Widget",()=>{
     expect(w.blocks[2]).toMatchObject({type:"trend",style:"bar"});
     expect((w.blocks[2] as {points:unknown[]}).points).toHaveLength(s.snapshot("local",at+3).history.length);
     expect(w.blocks.at(-1)).toMatchObject({type:"status",label:"example",value:"API",tone:"warning"});
+  });
+  test("an info failure is counted but never turns the card red",()=>{
+    const s=store();
+    s.observe({...sample,id:"ok",verdict:"pass",code:"ok"},at);
+    for(const t of [0,1,2])s.observe({...sample,severity:"info"},at+t);
+    const w=widget(s.snapshot("local",at+3,600000));
+    expect(w.blocks[0]).toMatchObject({type:"progress",value:1,max:2,tone:"warning"});
+    expect(w.blocks[1]).toMatchObject({type:"metric",value:1,tone:"neutral"});
+    expect(w.blocks.find(b=>JSON.stringify(b.label).includes('"Failing"'))).toMatchObject({value:1,tone:"warning"});
+    expect(w.blocks.at(-1)).toMatchObject({type:"status",value:"API",tone:"neutral"});
   });
 });
 

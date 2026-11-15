@@ -1,7 +1,7 @@
 import { validateRule } from "./rules.ts";
 import type { Engine } from "./engine.ts";
 import type { Diagnosis } from "./diagnose.ts";
-import type { Check, Settings, Snapshot, TaskPolicy } from "./types.ts";
+import type { Check, PeerPolicy, Settings, Snapshot, TaskPolicy } from "./types.ts";
 
 export function api(engine: Engine, diagnosis?: Diagnosis) {
   const store = engine.store;
@@ -20,9 +20,10 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
         if (Number(req.headers.get("content-length")??0)>32768) return json({ok:false,error:"Request too large"},413);
       }
       const body = async()=>{const text=await req.text(); if(text.length>32768) throw new Error("Request too large"); return JSON.parse(text);};
+      const policies = (kind:string)=>Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind=?").all(kind) as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)]));
       if (path === "/healthz") { const last=store.get<number>("meta","scan"); const ok=!!last && Date.now()-last<engine.leaseMs(); return json({ok,lastScanAt:last?new Date(last).toISOString():null},ok?200:503); }
       if (req.method === "GET" && path === "/api/snapshot") return json(engine.snapshot());
-      if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind='taskPolicy'").all() as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)])),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
+      if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:policies("taskPolicy"),peerPolicies:policies("peerPolicy"),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
       if (req.method === "GET" && path === "/api/widget") return json(widget(engine.snapshot()));
       if (req.method === "GET" && path.startsWith("/api/checks/")) { const id=decodeURIComponent(path.slice(12)); return json({ok:true,check:store.get<Check>("check",id),history:store.history(id)}); }
       // This machine only, never its peers: a hub reads it through the Space peer proxy, so evidence does not fan out.
@@ -52,6 +53,17 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
         if(b.errorThreshold!==undefined&&b.errorThreshold!==null){if(!Number.isInteger(b.errorThreshold)||b.errorThreshold<1||b.errorThreshold>20)throw new Error("Invalid errorThreshold");policy.errorThreshold=b.errorThreshold;}
         if(Object.keys(policy).length)store.put("taskPolicy",id,policy);else store.db.query("DELETE FROM documents WHERE kind='taskPolicy' AND id=?").run(id);
         void engine.scan().catch(()=>{});return json({ok:true,policy});
+      }
+      if (path.startsWith("/api/peer-policies/") && req.method === "PUT") {
+        // Keyed by the peer's name in Space's peer list. `maySleep: false` clears it.
+        const name=decodeURIComponent(path.slice(19)), b=await body();
+        if(!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name))throw new Error("Invalid peer name");
+        if(typeof b.maySleep!=="boolean")throw new Error("Invalid maySleep");
+        if(!b.maySleep){store.drop("peerPolicy",name);void engine.scan().catch(()=>{});return json({ok:true,policy:null});}
+        if(!engine.peers().some(p=>p.name===name))return json({ok:false,error:"Not a configured peer"},404);
+        const policy:PeerPolicy={maySleep:true};
+        if(b.sleepHours!==undefined&&b.sleepHours!==null){if(!Number.isInteger(b.sleepHours)||b.sleepHours<1||b.sleepHours>720)throw new Error("Invalid sleepHours");policy.sleepHours=b.sleepHours;}
+        store.put("peerPolicy",name,policy);void engine.scan().catch(()=>{});return json({ok:true,policy});
       }
       if (req.method === "GET" && path.startsWith("/api/scans/")) { const at=Date.parse(decodeURIComponent(path.slice(11))), record=Number.isFinite(at)?store.scanRecord(at):null; return record?json({ok:true,record}):json({ok:false,error:"Scan not found"},404); }
       const renamePath=req.method === "POST" ? path.match(/^\/api\/peers\/([^/]+)\/rename$/) : null;
@@ -90,16 +102,19 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
 /** The panel card (ai-space docs/app-spec.md): the list for older panels, state blocks for current ones. */
 export function widget(s: Snapshot) {
   const by=(st:string)=>s.checks.filter(c=>c.status===st).length, healthy=by("healthy"), failing=by("failing"), transient=by("transient"), unknown=by("unknown");
-  const open=s.incidents.filter(i=>i.status!=="resolved"), critical=open.some(i=>i.severity==="critical");
+  // An info failure (a peer that may sleep, asleep) is counted but asks nothing: it never turns the card red.
+  const serious=s.checks.filter(c=>c.status==="failing"&&c.severity!=="info").length;
+  const open=s.incidents.filter(i=>i.status!=="resolved"), critical=open.some(i=>i.severity==="critical"), asking=open.some(i=>i.severity!=="info");
+  const tone=(i:{severity:string})=>i.severity==="critical"?"negative":i.severity==="info"?"neutral":"warning";
   const items=[{text:`${s.machine}: ${healthy}/${s.checks.length} checks healthy${transient?` · ${transient} one-off`:""}`,url:"/",time:s.generatedAt},...open.slice(0,4).map(i=>({text:i.name,url:"/#incidents",time:i.openedAt}))];
   const blocks=[
-    {type:"progress",label:{en:`Healthy checks · ${s.machine}`,zh:`健康检查 · ${s.machine}`},value:healthy,max:Math.max(s.checks.length,1),display:`${healthy}/${s.checks.length}`,tone:healthy===s.checks.length?"positive":failing?"negative":"warning",url:"/"},
-    {type:"metric",label:{en:"Open incidents",zh:"未结事件"},value:open.length,tone:open.length?(critical?"negative":"warning"):"positive",url:"/#incidents"},
+    {type:"progress",label:{en:`Healthy checks · ${s.machine}`,zh:`健康检查 · ${s.machine}`},value:healthy,max:Math.max(s.checks.length,1),display:`${healthy}/${s.checks.length}`,tone:healthy===s.checks.length?"positive":serious?"negative":"warning",url:"/"},
+    {type:"metric",label:{en:"Open incidents",zh:"未结事件"},value:open.length,tone:!open.length?"positive":critical?"negative":asking?"warning":"neutral",url:"/#incidents"},
     {type:"trend",label:{en:"Failing per scan",zh:"每轮失败数"},caption:{en:`last ${s.history.length} scans`,zh:`最近 ${s.history.length} 轮巡检`},style:"bar",points:s.history.map(h=>({t:h.at,v:h.failing+(h.transient??0)}))},
-    {type:"metric",label:{en:"Failing",zh:"失败"},value:failing,tone:failing?"negative":"neutral"},
+    {type:"metric",label:{en:"Failing",zh:"失败"},value:failing,tone:serious?"negative":failing?"warning":"neutral"},
     {type:"metric",label:{en:"One-off",zh:"偶发"},value:transient,caption:{en:"failed once, not yet confirmed",zh:"单次失败，尚未确认"},tone:transient?"warning":"neutral"},
     {type:"metric",label:{en:"Unknown",zh:"未知"},value:unknown},
-    ...open.slice(0,6).map(i=>({type:"status",label:i.app,value:i.name,time:i.openedAt,tone:i.severity==="critical"?"negative":"warning",url:"/#incidents"})),
+    ...open.slice(0,6).map(i=>({type:"status",label:i.app,value:i.name,time:i.openedAt,tone:tone(i),url:"/#incidents"})),
   ];
   return {ok:true,items,asOf:s.lastScanAt??s.generatedAt,staleAfter:Math.round(s.staleAfterMs/1000),blocks};
 }

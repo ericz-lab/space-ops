@@ -2,7 +2,7 @@ import { ruleActive, pendingDeadline } from "./rules.ts";
 import { Store } from "./store.ts";
 import { declared, inspect } from "./inspections.ts";
 import { declaredNoop, hostSamples, httpProbe, readHostResources, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type CpuTicks, type Task } from "./probes.ts";
-import type { Check, PeerView, Sample, Snapshot, TaskPolicy } from "./types.ts";
+import { SLEEP_HOURS, type Check, type PeerPolicy, type PeerView, type Sample, type Snapshot, type TaskPolicy } from "./types.ts";
 
 export class Engine {
   private running: Promise<void> | null = null;
@@ -72,7 +72,7 @@ export class Engine {
             const snap = await readJson(p.url,10000,this.fetcher) as Snapshot;
             if (snap.version !== 1 || !Array.isArray(snap.checks) || !Array.isArray(snap.incidents) || typeof snap.machine !== "string" || !Number.isFinite(Date.parse(snap.generatedAt))) throw new Error("Invalid snapshot");
             const lease=Number.isFinite(snap.staleAfterMs)&&snap.staleAfterMs>=60_000&&snap.staleAfterMs<=14_400_000?snap.staleAfterMs:240_000;
-            if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error("its last scan expired or its clock differs");
+            if (!snap.lastScanAt || !Number.isFinite(Date.parse(snap.lastScanAt)) || now-Date.parse(snap.lastScanAt)>lease || Date.parse(snap.lastScanAt)>now+60_000) throw new Error(SCAN_EXPIRED);
             read.set(p.name, snap);
           } catch (e) { failed.set(p.name, readFailure(e)); /* Recorded below as unavailable. */ }
         });
@@ -86,7 +86,7 @@ export class Engine {
           if (!this.store.get<PeerView>("peer",old.name)) continue;
           const since = old.missingSince ?? new Date(now).toISOString();
           if (unread && now-Date.parse(since) < RENAME_WAIT_MS) { this.store.put("peer",old.name,{...old,missingSince:since} satisfies PeerView); seen.add(`peer:${old.name}`); continue; }
-          this.store.drop("peer",old.name); this.store.retire(`peer:${old.name}`,"Peer is no longer configured; check retired",now);
+          this.store.drop("peer",old.name); this.store.drop("peerPolicy",old.name); this.store.retire(`peer:${old.name}`,"Peer is no longer configured; check retired",now);
         }
         for (const p of peers) {
           const prev = this.store.get<PeerView>("peer",p.name), snap = read.get(p.name);
@@ -94,9 +94,9 @@ export class Engine {
             this.store.put("peer",p.name,{name:p.name,url:p.url,status:"healthy",snapshot:snap,receivedAt:new Date().toISOString()} satisfies PeerView);
             observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"pass",code:"peer_ok",detail:"Peer collector is reporting fresh observations"});
           } else {
-            const detail = peerFailure(spaceSays.get(p.name) ?? failed.get(p.name), prev?.receivedAt ?? null);
-            this.store.put("peer",p.name,{name:p.name,url:p.url,status:"unknown",error:detail,snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
-            observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",code:"peer_unavailable",detail});
+            const down = peerDown(spaceSays.get(p.name) ?? failed.get(p.name), prev?.receivedAt ?? null, this.store.get<PeerPolicy>("peerPolicy",p.name), this.store.get<Check>("check",`peer:${p.name}`), now);
+            this.store.put("peer",p.name,{name:p.name,url:p.url,status:"unknown",error:down.detail,snapshot:prev?.snapshot??null,receivedAt:prev?.receivedAt??null} satisfies PeerView);
+            observe({id:`peer:${p.name}`,name:p.name,app:"peers",kind:"peer",coverage:"availability",verdict:"fail",...down});
           }
         }
       }),
@@ -147,7 +147,9 @@ function readFailure(e: unknown): string {
   const err = e as Error;
   if (err?.name === "TimeoutError") return "no answer within 10 s";
   const m = String(err?.message ?? e);
-  return /^HTTP \d+$/.test(m) ? `snapshot read failed (${m})` : m === "Invalid snapshot" ? "invalid snapshot" : m.slice(0, 200);
+  // Cloudflare answered for a tunnel with no connector: worded as Space words it.
+  if (m === "HTTP 530 (Cloudflare 1033)") return "tunnel not connected (Cloudflare 1033)";
+  return /^HTTP \d+( \(Cloudflare \d+\))?$/.test(m) ? `snapshot read failed (${m})` : m === "Invalid snapshot" ? "invalid snapshot" : m.slice(0, 200);
 }
 /**
  * The peer check's failure text: the reason, Space's own first (it names a tunnel with no connector), and when the
@@ -157,6 +159,28 @@ function readFailure(e: unknown): string {
 export function peerFailure(reason: string | undefined, receivedAt: string | null): string {
   const last = receivedAt && Number.isFinite(Date.parse(receivedAt)) ? `last snapshot ${new Date(receivedAt).toISOString().slice(0, 16)}Z` : "no snapshot received yet";
   return `Peer collector is unavailable: ${reason || "its snapshot expired"}; ${last}`;
+}
+/** A peer whose snapshot answered but whose collector has not scanned within its lease, as right after the machine wakes. */
+const SCAN_EXPIRED = "its last scan expired or its clock differs";
+/** Cloudflare has no connector for the peer's tunnel (Space says `tunnel not connected (Cloudflare 1033)`): the machine sleeps, is offline, or its connector stopped. */
+export function tunnelClosed(reason: string | undefined): boolean {
+  return !!reason && /\btunnel not connected\b|\bCloudflare 1033\b/i.test(reason);
+}
+/**
+ * A failed peer check's code, detail and severity. A peer that may sleep (its PeerPolicy) and looks asleep is `info`
+ * (code `peer_asleep`, never notified) until its last good snapshot is older than its sleep hours; after that it is a
+ * warning again. Asleep: its tunnel has no connector, or, right after that, its collector has not scanned since the
+ * machine woke. Any other reason (an error status through an open tunnel such as HTTP 502, a rejected token, no
+ * answer) keeps the default severity, as does every peer without the policy.
+ */
+export function peerDown(reason: string | undefined, receivedAt: string | null, policy: PeerPolicy | null, prev: Pick<Check, "code" | "failedAt"> | null, now: number): Pick<Sample, "code" | "detail" | "severity"> {
+  const detail = peerFailure(reason, receivedAt);
+  if (!policy?.maySleep || !(tunnelClosed(reason) || (reason === SCAN_EXPIRED && prev?.code === "peer_asleep"))) return { code: "peer_unavailable", detail };
+  const hours = policy.sleepHours ?? SLEEP_HOURS;
+  // Down since the last good snapshot; a peer never read yet, since this failure began.
+  const since = Date.parse(receivedAt ?? prev?.failedAt ?? "");
+  if (!Number.isFinite(since) || now - since <= hours * 3_600_000) return { code: "peer_asleep", severity: "info", detail: `${detail}; this peer may sleep, so it is info for up to ${hours} h` };
+  return { code: "peer_unavailable", severity: "warning", detail: `${detail}; down longer than the ${hours} h this peer may sleep` };
 }
 /** How long a peer the Space list stopped naming waits for an unread new peer to say whether it is the same machine. */
 export const RENAME_WAIT_MS = 86_400_000;

@@ -14,11 +14,16 @@ export type Rule = {
   weekdays?: number[];
   expectedStatus: number; assertions: Assertion[]; severity: "warning" | "critical";
 };
-export type Sample = { id: string; name: string; app: string; kind: string; verdict: Verdict; code: string; detail: string; value?: number | string; threshold?: number | string; latencyMs?: number; evidenceAt?: string; coverage: "availability" | "execution" | "assertion" | "host"; failAfter?: number; recoverAfter?: number; severity?: "warning" | "critical"; staleAfterMs?: number; transient?: boolean };
+/** `info`: recorded but asks nothing of anyone, so it is never notified (a peer that may sleep, asleep). */
+export type Severity = "info" | "warning" | "critical";
+export type Sample = { id: string; name: string; app: string; kind: string; verdict: Verdict; code: string; detail: string; value?: number | string; threshold?: number | string; latencyMs?: number; evidenceAt?: string; coverage: "availability" | "execution" | "assertion" | "host"; failAfter?: number; recoverAfter?: number; severity?: Severity; staleAfterMs?: number; transient?: boolean };
 export type Check = Sample & { status: Status; failures: number; successes: number; observedAt: string; lastPassedAt: string | null; failedAt?: string | null; mutedUntil: string | null; enabled: boolean };
 export type IncidentEvent = { at: string; type: string; detail: string; by?: string };
-/** `manual`: created by an operator; it stays open until an operator resolves it. `resolvedBy` names who closed it ("check" when the check recovered). */
-export type Incident = { id: string; checkId: string; name: string; app: string; severity: "warning" | "critical"; status: "open" | "acknowledged" | "resolved"; openedAt: string; updatedAt: string; resolvedAt: string | null; detail: string; source?: "auto" | "manual"; resolvedBy?: string; events: IncidentEvent[] };
+/**
+ * `manual`: created by an operator; it stays open until an operator resolves it. `resolvedBy` names who closed it ("check" when the check recovered).
+ * `severity` of an automatic incident rises with its check's (an `escalated` event) and never falls while it is open.
+ */
+export type Incident = { id: string; checkId: string; name: string; app: string; severity: Severity; status: "open" | "acknowledged" | "resolved"; openedAt: string; updatedAt: string; resolvedAt: string | null; detail: string; source?: "auto" | "manual"; resolvedBy?: string; events: IncidentEvent[] };
 /** Non-passing observations of one scan: from just after the previous scan to this one. */
 export type ScanRecord = { at: string; previousAt: string | null; checks: { id: string; name: string; app: string; kind: string; status: string; verdict: string; code: string; at: string }[] };
 /**
@@ -45,6 +50,13 @@ export type Snapshot = { version: 1; machine: string; collector?: string; genera
 export type PeerView = { name: string; url?: string; status: "healthy" | "unknown"; error?: string; snapshot: Snapshot | null; receivedAt: string | null; missingSince?: string };
 /** Operator policy for one local task: success due within `deadlineMinutes` of its start; `errorThreshold` overrides the global one. */
 export type TaskPolicy = { deadlineMinutes?: number; errorThreshold?: number };
+/**
+ * Operator policy for one peer, keyed by its name: the machine may sleep (a laptop). While it looks asleep its check
+ * is `info` and notifies nobody, for up to `sleepHours` (default SLEEP_HOURS) after its last good snapshot.
+ */
+export type PeerPolicy = { maySleep: true; sleepHours?: number };
+/** How long a peer that may sleep may stay asleep before its check is a warning again. */
+export const SLEEP_HOURS = 24;
 export type Settings = { notifications: boolean; scanMinutes: number; failAfter: number; recoverAfter: number; taskErrorThreshold: number; diskPercent: number; memoryPercent: number; cpuPercent: number };
 export const DEFAULT_SETTINGS: Settings = { notifications: false, scanMinutes: 5, failAfter: 3, recoverAfter: 2, taskErrorThreshold: 3, diskPercent: 90, memoryPercent: 95, cpuPercent: 90 };
 /** A check an app declares in space.yaml (`checks:`), as Space's GET /api/checks lists it. */

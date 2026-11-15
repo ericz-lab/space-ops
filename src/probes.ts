@@ -19,9 +19,16 @@ export function withSpaceToken(fetcher: typeof fetch, api: string, token?: strin
     return fetcher(input, { ...init, headers });
   }) as typeof fetch;
 }
+/**
+ * GET bounded JSON. An error status throws `HTTP <status>`; Cloudflare's own 530 names its 1xxx code from the body
+ * (`HTTP 530 (Cloudflare 1033)`: the tunnel has no connector), as a Space peer proxy passes it through.
+ */
 export async function readJson(url: string, timeoutMs = 8000, fetcher: typeof fetch = fetch): Promise<any> {
   const r = await fetcher(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
-  if (!r.ok) { await r.body?.cancel(); throw new Error(`HTTP ${r.status}`); }
+  if (!r.ok) {
+    const code = r.status === 530 ? /error code:?\s*(1\d{3})\b/i.exec(await limitedText(r, 4096).catch(() => ""))?.[1] : undefined;
+    await r.body?.cancel().catch(() => {}); throw new Error(`HTTP ${r.status}${code ? ` (Cloudflare ${code})` : ""}`);
+  }
   const text = await limitedText(r);
   return JSON.parse(text);
 }
