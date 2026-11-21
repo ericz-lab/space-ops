@@ -1,0 +1,84 @@
+# The installation package's declaration (ai-space docs/app-packages.md, docs/app-catalog.md).
+# space.yaml stays spec 1 for the git deployment; the components here (everything but spec,
+# version, requires, offline, launch and build) must equal its own: src/release.test.ts checks.
+# Release: raise `version` (and package.json's), then tag v<version>; .github/workflows/release.yml
+# builds, signs and publishes. `bun run pack` builds the same packages locally.
+
+spec: 2
+name: space-ops
+version: 0.2.0
+title: Space Ops
+description: Monitor services, tasks and data with reusable checks, incident evidence and peer visibility.
+icon: icon.png
+status: active
+repo: https://github.com/ericz-lab/space-ops.git
+i18n:
+  zh:
+    title: 运维中心
+    description: 通用巡检、数据断言与故障追踪，统一查看本机及 peer 的运行状态。
+    agents:
+      operator:
+        title: 运维助手
+        description: 查看系统状态、巡检和故障证据，排查本机及 peer 的运行问题。
+      engineer:
+        title: 平台工程师
+        description: 维护 ai-space 本身：升级、备份与恢复、路由和 peer，并评审平台变更。
+
+requires:
+  spaceApi: 1
+  bun: 1.3.0
+
+offline:
+  features:
+    - Checks, incidents and evidence of this machine
+  online:
+    - Peer machines
+    - AI diagnosis
+
+# The bundle `bun run build` makes; ai-space hands over PORT. Background: the collector scans on
+# its own cadence, so the process must not stop when nobody has the page open.
+launch:
+  kind: process
+  runtime: bun
+  entry: dist/index.js
+  mode: background
+  health: /healthz
+
+# How a checkout becomes the package: in a scratch copy, never in this tree. The agents' prompts,
+# the skill and src/inspect.ts (the agents' one shell command) ship beside the bundle.
+build:
+  install: bun install --frozen-lockfile
+  run: bun run build
+  include: [dist, icon.png, agents, skills, src/inspect.ts]
+
+storage:
+  database: sqlite
+skills:
+  - path: skills/space-ops
+agents:
+  - name: operator
+    title: Space Ops Assistant
+    description: Inspect system status, daily checks and incident evidence, and troubleshoot local and peer failures.
+    prompt: agents/operator.md
+    tools: [Read, Glob, Grep, "Bash(bun src/inspect.ts *)"]
+    skills: [./skills/space-ops]
+  # The Platform Engineer holds the write tools the operator deliberately lacks: the space CLI
+  # (upgrades, backups and restores, router, peers, services) and bun for the platform checkout.
+  - name: engineer
+    title: Platform Engineer
+    description: Maintains ai-space itself - upgrades, backups and restores, the router and peers - and reviews platform changes before they reach production.
+    prompt: agents/engineer.md
+    tools: [Read, Glob, Grep, "Bash(bun src/inspect.ts *)", "Bash(space *)", "Bash(bun *)"]
+    skills: [./skills/space-ops]
+# The one-click diagnosis (tag `diagnose`) defaults to Codex's advanced tier; the panel may override it.
+model:
+  tags:
+    diagnose: codex/advanced
+widgets:
+  - name: status
+    title: Space Ops · Status
+    kind: items
+    source: /api/widget
+    link: /
+    size: 2x1
+    refresh: 60s
