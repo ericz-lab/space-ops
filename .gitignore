@@ -4,3 +4,4 @@ data/
 *.db*
 artifacts/
 .DS_Store
+dist/

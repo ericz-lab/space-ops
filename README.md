@@ -125,6 +125,17 @@ SQLite in `DATABASE_URL`, otherwise `${SPACE_APP_DATA_DIR}/main.db`, otherwise l
 
 Mutation endpoints require JSON and an HTTP(S) Origin matching the request host and port (TLS terminates at Space ingress); cross-site browser requests are rejected. This is CSRF protection, not identity authentication. Loopback and the configured private access layer establish identity. Peer snapshot reads must travel through the authenticated Space peer connection or a private tunnel.
 
+## Install
+
+On an ai-space Space, from the panel's app catalog, or:
+
+```sh
+space app install space-ops            # the signed package
+space app install space-ops --source   # cloned to <workspace>/app-src/space-ops and built on your machine
+```
+
+The package runs as a background child of the Space on a port the Space assigns. Machine settings such as `OPS_LOGS_COMMAND` or `OPS_PEERS` go in `<workspace>/data/space-ops/.env`. The Platform Engineer agent's `space` commands use the operator credential the `space` CLI finds on the machine (`<workspace>/run/operator-token` under `SPACE_AUTH=builtin`).
+
 ## Deployment
 
 Set up the public Access policy before registering the app (the wildcard router exposes new apps automatically). Run `bash deploy/bootstrap.sh <ssh-host>` from this checkout after `bun run check`; it installs a bare Git receiver and the repeatable hook, pushes main, and lets Space provision and supervise the service. Subsequent deployments are `git push <remote> main`. The hook installs locked dependencies before restarting and validates `/healthz` afterwards. See AGENTS.md for host-specific operator notes.
