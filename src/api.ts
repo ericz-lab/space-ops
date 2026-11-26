@@ -40,6 +40,15 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
       if (req.method === "POST" && path === "/api/scan") { void engine.scan().catch(()=>{}); return json({ok:true},202); }
       if (req.method === "POST" && path === "/api/rules") { const rule=validateRule(await body()); if(store.rules().length>=100) throw new Error("At most 100 custom rules");store.put("rule",rule.id,rule);void engine.scan().catch(()=>{});return json({ok:true,rule},201); }
       if (path.startsWith("/api/rules/") && req.method === "PUT") { const id=decodeURIComponent(path.slice(11));if(!store.get("rule",id))return json({ok:false,error:"Rule not found"},404);const rule=validateRule(await body(),id);store.put("rule",id,rule);store.db.query("DELETE FROM documents WHERE kind='check' AND id=?").run(id);void engine.scan().catch(()=>{});return json({ok:true,rule}); }
+      const forgetPath=req.method === "POST" ? path.match(/^\/api\/checks\/([^/]+)\/forget$/) : null;
+      if (forgetPath) {
+        // A check whose resource left the machine for good stays not_observed forever; an operator forgets it. One still observed is refused.
+        const id=decodeURIComponent(forgetPath[1]!), c=store.get<Check>("check",id);
+        if (!c) return json({ok:false,error:"Check not found"},404);
+        if (c.code !== "not_observed") return json({ok:false,error:"Check is still observed; only a check whose resource is no longer observed can be forgotten"},409);
+        const {incident}=store.forget(id,(req.headers.get("cf-access-authenticated-user-email")??"").slice(0,200)||undefined);
+        return json({ok:true,id,resolvedIncident:incident});
+      }
       if (path.startsWith("/api/checks/") && req.method === "PATCH") {
         const id=decodeURIComponent(path.slice(12)), b=await body(), patch:{enabled?:boolean;mutedUntil?:string|null}={};
         if (typeof b.enabled === "boolean") patch.enabled=b.enabled;

@@ -785,3 +785,29 @@ describe("Backups",()=>{
   });
 });
 
+describe("Forgetting a check",()=>{
+  const post=(handler:ReturnType<typeof api>,id:string)=>handler(new Request(`http://ops.test/api/checks/${encodeURIComponent(id)}/forget`,{method:"POST",headers:{"content-type":"application/json",origin:"http://ops.test"},body:"{}"}));
+  test("only a check that is no longer observed is forgotten, with its open incident resolved",async()=>{
+    const s=store();let services=[{app:"gone",title:"Gone",status:"active",health:"down"},{app:"here",title:"Here",status:"active",health:"ok"}];
+    const e=new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(url=>url.endsWith("services")?{services}:url.endsWith("tasks")?{tasks:[]}:{peers:[]}));
+    for(let i=0;i<3;i++)await e.scan();
+    const incident=s.activeIncident("service:gone")!;expect(incident).toBeDefined();
+    const handler=api(e);
+    expect((await post(handler,"service:gone")).status).toBe(409);
+    expect((await post(handler,"service:here")).status).toBe(409);
+    expect((await post(handler,"service:nothing")).status).toBe(404);
+    // The app moved off the machine: its check stays not_observed, scan after scan.
+    services=services.filter(x=>x.app!=="gone");await e.scan();await e.scan();
+    expect(s.get<{status:string;code:string}>("check","service:gone")).toMatchObject({status:"unknown",code:"not_observed"});
+    const r=await post(handler,"service:gone");expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ok:true,id:"service:gone",resolvedIncident:incident.id});
+    expect(s.get("check","service:gone")).toBeNull();expect(s.activeIncident("service:gone")).toBeUndefined();
+    expect(s.incident(incident.id)).toMatchObject({status:"resolved",resolvedBy:"operator"});
+    expect(s.incident(incident.id).events.at(-1)).toMatchObject({type:"resolved",detail:"Check forgotten by an operator: its resource is no longer observed"});
+    await e.scan();expect(s.get("check","service:gone")).toBeNull();expect(s.get<CheckLike>("check","service:here")?.status).toBe("healthy");
+    // A paused leftover is forgotten too; a cross-site write is refused before anything changes.
+    services=[];await e.scan();s.control("service:here",{enabled:false});
+    expect((await handler(new Request("http://ops.test/api/checks/service%3Ahere/forget",{method:"POST",headers:{"content-type":"application/json",origin:"https://evil.test"},body:"{}"}))).status).toBe(403);
+    expect((await post(handler,"service:here")).status).toBe(200);expect(s.get("check","service:here")).toBeNull();
+  });
+});

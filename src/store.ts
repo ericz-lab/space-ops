@@ -94,6 +94,21 @@ export class Store {
     if (i && i.source !== "manual") { i.status = "resolved"; i.resolvedAt = at; i.resolvedBy = "retired"; i.updatedAt = at; i.events.push({ at, type: "resolved", detail }); this.put("incident", i.id, i); }
     this.db.query("DELETE FROM documents WHERE kind IN ('check','control') AND id=?").run(id);
   }
+  /**
+   * An operator forgets a check whose resource is gone for good (an app moved to another machine). Only a check no scan
+   * observes any more (`not_observed`, paused or not): one still observed would only come back. Its open incident,
+   * automatic or an operator's, is resolved by that operator; incidents and observations stay as history.
+   */
+  forget(id: string, by?: string, now = Date.now()): { check: Check; incident: string | null } {
+    return this.db.transaction(() => {
+      const c = this.get<Check>("check", id); if (!c) throw new Error("Check not found");
+      if (c.code !== "not_observed") throw new Error("Check is still observed; only a check whose resource is no longer observed can be forgotten");
+      const i = this.activeIncident(id), at = new Date(now).toISOString();
+      if (i) { i.status = "resolved"; i.resolvedAt = at; i.updatedAt = at; i.resolvedBy = by || "operator"; i.events = trimEvents([...i.events, { at, type: "resolved", detail: "Check forgotten by an operator: its resource is no longer observed", by: by || "operator" }]); this.put("incident", i.id, i); }
+      this.db.query("DELETE FROM documents WHERE kind IN ('check','control') AND id=?").run(id);
+      return { check: c, incident: i?.id ?? null };
+    })();
+  }
   acknowledge(id: string, now = Date.now(), by?: string) {
     const i = this.get<Incident>("incident", id); if (!i) throw new Error("Incident not found");
     if (i.status === "open") { i.status = "acknowledged"; i.events.push({ at: new Date(now).toISOString(), type: "acknowledged", detail: "Acknowledged by operator", ...(by ? { by } : {}) }); this.put("incident", id, i); }
