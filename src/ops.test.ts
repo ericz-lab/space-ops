@@ -785,6 +785,49 @@ describe("Backups",()=>{
   });
 });
 
+describe("Space uptime",()=>{
+  const up={startedAt:"2026-11-22T08:00:00.000Z",currentMs:3*86_400_000+4*3600_000,totalMs:412*3600_000,firstStartedAt:"2026-10-01T00:00:00.000Z",restarts:5};
+  // Space's own API: empty lists, and /api/space/uptime answering `uptime` (status 200) or refusing.
+  const space=(status:number,body:unknown):typeof fetch=>(async(input:RequestInfo|URL)=>{const u=String(input);if(u.endsWith("/api/space/uptime"))return Response.json(body,{status});return Response.json(u.endsWith("/api/tasks")?{tasks:[]}:u.endsWith("services")?{services:[]}:u.endsWith("/api/checks")?{checks:[]}:{peers:[]});}) as typeof fetch;
+  const engine=(s:Store,f:typeof fetch)=>new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},f);
+  test("read each scan into the snapshot, the dashboard and the panel card, never as a check",async()=>{
+    const s=store(),e=engine(s,space(200,{ok:true,uptime:up}));await e.scan();
+    const snap=e.snapshot();expect(snap.uptime).toMatchObject(up);expect(Number.isFinite(Date.parse(snap.uptime!.observedAt))).toBe(true);
+    expect(snap.checks.filter(c=>/uptime/.test(c.id+c.code+c.name))).toHaveLength(0);
+    const dash=await (await api(e)(new Request("http://ops.test/api/dashboard"))).json() as {uptime:{machine:string;restarts:number;text:string}[]};
+    expect(dash.uptime).toHaveLength(1);expect(dash.uptime[0]).toMatchObject({machine:"local",restarts:5});
+    expect(dash.uptime[0]!.text).toMatch(/^Running for 3 d 4 h · 412 h in all · 5 restarts$/);
+    const w=widget(snap);
+    expect(w.blocks.find(b=>JSON.stringify(b.label).includes("Space uptime"))).toMatchObject({type:"status",label:{en:"Space uptime",zh:"持续运行"},value:{en:"3 d 4 h",zh:"3 天 4 小时"},caption:{en:"412 h in all · 5 restarts",zh:"累计 412 小时 · 重启 5 次"},tone:"neutral"});
+    // Past the scan lease it is no longer current, so the snapshot leaves it out.
+    expect(s.snapshot("local",Date.now()+10*60_000,240_000).uptime).toBeUndefined();
+  });
+  test("a peer's snapshot carries its own uptime to the hub; a peer without it is left out",async()=>{
+    const peerSnap=(machine:string,extra:object={})=>({version:1,machine,generatedAt:new Date().toISOString(),lastScanAt:new Date().toISOString(),staleAfterMs:240_000,checks:[],incidents:[],history:[],...extra});
+    const f=(async(input:RequestInfo|URL)=>{const u=String(input);
+      if(u.includes("/peers/laptop/"))return Response.json(peerSnap("laptop",{uptime:{...up,restarts:1,observedAt:new Date().toISOString()}}));
+      if(u.includes("/peers/old/"))return Response.json(peerSnap("old"));
+      if(u.endsWith("/api/space/uptime"))return Response.json({ok:false,error:"unauthorized"},{status:401});
+      return Response.json(u.endsWith("/api/tasks")?{tasks:[]}:u.endsWith("services")?{services:[]}:u.endsWith("/api/checks")?{checks:[]}:{peers:[{name:"laptop"},{name:"old"}]});}) as typeof fetch;
+    const e=engine(store(),f);await e.scan();
+    const dash=await (await api(e)(new Request("http://ops.test/api/dashboard"))).json() as {uptime:{machine:string;text:string}[]};
+    expect(dash.uptime.map(u=>[u.machine,u.text])).toEqual([["laptop","Running for 3 d 4 h · 412 h in all · 1 restart"]]);
+  });
+  test("an older Space or a refused token shows nothing and opens nothing; an older snapshot renders without it",async()=>{
+    for(const [status,body] of [[401,{ok:false,error:"unauthorized"}],[404,{ok:false,error:"Not found"}],[503,{ok:false,error:"not started"}],[200,{ok:true}]] as [number,unknown][]){
+      const s=store(),e=engine(s,space(status,body));await e.scan();const snap=e.snapshot();
+      expect(snap.uptime).toBeUndefined();expect(snap.checks.filter(c=>/uptime/.test(c.id+c.code+c.name))).toHaveLength(0);
+      expect(snap.checks.some(c=>c.id==="source:uptime")).toBe(false);
+      expect(((await (await api(e)(new Request("http://ops.test/api/dashboard"))).json()) as {uptime:unknown[]}).uptime).toEqual([]);
+    }
+    const s=store(),e=engine(s,space(200,{ok:true,uptime:up}));await e.scan();
+    const old={...e.snapshot(),uptime:undefined} as Snapshot,w=widget(old);
+    expect(w.blocks.some(b=>JSON.stringify(b.label).includes("Space uptime"))).toBe(false);
+    // A peer's snapshot with a broken field is the same as none.
+    expect(widget({...old,uptime:{startedAt:"soon"}} as unknown as Snapshot).blocks.some(b=>JSON.stringify(b.label).includes("Space uptime"))).toBe(false);
+  });
+});
+
 describe("Forgetting a check",()=>{
   const post=(handler:ReturnType<typeof api>,id:string)=>handler(new Request(`http://ops.test/api/checks/${encodeURIComponent(id)}/forget`,{method:"POST",headers:{"content-type":"application/json",origin:"http://ops.test"},body:"{}"}));
   test("only a check that is no longer observed is forgotten, with its open incident resolved",async()=>{

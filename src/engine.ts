@@ -1,6 +1,7 @@
 import { ruleActive, pendingDeadline } from "./rules.ts";
 import { Store } from "./store.ts";
 import { declared, inspect } from "./inspections.ts";
+import { parseUptime } from "./uptime.ts";
 import { backupConfigured, backupSample, declaredNoop, hostSamples, httpProbe, isBackupTask, lastSuccess, readHostResources, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type CpuTicks, type Task } from "./probes.ts";
 import { SLEEP_HOURS, type BackupState, type Check, type PeerPolicy, type PeerView, type Sample, type Snapshot, type TaskPolicy } from "./types.ts";
 
@@ -115,6 +116,8 @@ export class Engine {
         await pool(list, 4, async c => this.store.putInspection(await inspect(c, this.fetcher, now)));
         this.store.retainInspections(list.map(c => c.id));
       }),
+      // How long this Space has run (information, never a check): an older Space, or one that refuses the app token, answers nothing and nothing is shown.
+      get("/api/space/uptime").then(d=>{const u=parseUptime(d,new Date().toISOString());if(u)this.store.put("meta","uptime",u);},()=>{}),
       readHostResources(this.config.dataDir,this.cpuTicks,this.config.cpuSettleMs??0,now).then(({resources,ticks})=>{ this.cpuTicks=ticks; this.store.put("meta","resources",resources); hostSamples(resources,settings).forEach(observe); }),
       pool(this.store.rules(),4,async rule=>{
         seen.add(rule.id);

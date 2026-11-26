@@ -1,3 +1,4 @@
+import type { SpaceUptime } from "./uptime.ts";
 /** `transient`: a failure below the incident threshold (one-off error); never healthy, never an incident. */
 export type Status = "healthy" | "transient" | "failing" | "recovering" | "unknown" | "paused" | "off";
 export type Verdict = "pass" | "fail" | "unknown";
@@ -58,8 +59,11 @@ export const BACKUP_UNCONFIGURED = {
 export function notices(s: Pick<Snapshot, "backup">): Notice[] {
   return s.backup?.configured === false ? [{ code: BACKUP_UNCONFIGURED.code, text: BACKUP_UNCONFIGURED.en, hint: BACKUP_UNCONFIGURED.hint.en }] : [];
 }
-/** `collector`: the collector's own id (Store.collectorId), the same across renames; absent from older collectors. */
-export type Snapshot = { version: 1; machine: string; collector?: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources; backup?: BackupState };
+/**
+ * `collector`: the collector's own id (Store.collectorId), the same across renames; absent from older collectors.
+ * `uptime`: how long this machine's Space has run (src/uptime.ts); absent when its Space does not say, or past the lease.
+ */
+export type Snapshot = { version: 1; machine: string; collector?: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources; backup?: BackupState; uptime?: SpaceUptime };
 /**
  * `url`: where the snapshot is read; the peer's diagnosis evidence sits next to it. `missingSince`: the
  * Space peer list stopped naming it while a newly named peer could not be read yet, so whether it was

@@ -23,6 +23,8 @@ bun src/inspect.ts peer-evidence '<peer-name>'
 
 `status` also lists `notices`: reminders per machine, such as `backup_not_configured` (Backup destination not configured: no backup can run there). Report a reminder as such; it is not a fault and not counted in the checks. A failing backup is a task check with code `backup_failed` or `backup_stale`.
 
+`status` also lists `uptime`: per machine, how long its Space has run since its last start, all runs added up and the restarts (`text`, for example `Running for 3 d 4 h · 412 h in all · 5 restarts`). It is information, never a check; a machine whose Space is older, or does not let the app read it, is not listed.
+
 For a peer, use `peer` for its local-only snapshot and `peer-evidence` for evidence gathered on that peer. These go through `SPACE_API_URL` and the authenticated Space peer proxy. A peer's evidence never recursively includes its peers. If fresh evidence fails, label cached dashboard peer snapshots with their received time and stale/unknown status; say which task runs, model calls or logs were not read.
 
 The local command reads the service port from the app's manifest. Peer reads require `SPACE_API_URL` and `SPACE_APP_TOKEN` (or `SPACE_API_TOKEN`). Space-started sessions receive the app environment. In a hand-started session load only the needed values from the app's provisioned `space.env` described by the workspace guide; never print credential files or fall back to a source checkout's data directory.

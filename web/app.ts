@@ -1,5 +1,6 @@
 import { notices, type Check, type HostResources, type Incident, type Inspection, type PeerPolicy, type PeerView, type Report, type ReportItem, type Rule, type ScanRecord, type Settings, type Severity, type Snapshot, type Status, type TaskPolicy } from "../src/types.ts";
 import { markdown } from "./markdown.ts";
+import { parseUptime, uptimeText } from "../src/uptime.ts";
 import { roomScene, bindRoom, type RackMachine } from "./room.ts";
 import { t, tn, lang, setLang, ago, until, date, type Key } from "./i18n.ts";
 
@@ -245,8 +246,9 @@ function meter(percent:number|undefined,threshold:number,fresh:boolean,detail:st
 /** Measured CPU, memory, disk and load of every machine in view; grey when its snapshot is stale. A number not measured says so. Each row selects its machine. */
 function resourcesTile(snapshots:{name:string;snapshot:Snapshot|null;status:string;local:boolean}[]){
   const s=data!.settings;
-  const tr=(m:typeof snapshots[number])=>{const r:HostResources|undefined=m.snapshot?.resources,fresh=m.status==="healthy",all=m.snapshot?.checks??[],ok=all.filter(c=>c.status==="healthy").length;
-    const name=`<td class="r-name"><button type="button" class="m-name">${esc(m.name)}</button> <span class="sp-nc">${m.local?t("local"):t("peer")}</span>${fresh?"":` <span class="sp-badge warn">${t("staleShort")}</span>`}<small>${fresh?(r?`${t("sampled")} ${ago(r.sampledAt)}`:""):esc(t("stale"))}</small></td>`;
+  const tr=(m:typeof snapshots[number])=>{const r:HostResources|undefined=m.snapshot?.resources,fresh=m.status==="healthy",all=m.snapshot?.checks??[],ok=all.filter(c=>c.status==="healthy").length,up=parseUptime(m.snapshot?.uptime);
+    // How long the machine's Space has run, under its name: information, never a check (absent from older Spaces and snapshots).
+    const name=`<td class="r-name"><button type="button" class="m-name">${esc(m.name)}</button> <span class="sp-nc">${m.local?t("local"):t("peer")}</span>${fresh?"":` <span class="sp-badge warn">${t("staleShort")}</span>`}<small>${fresh?(r?`${t("sampled")} ${ago(r.sampledAt)}`:""):esc(t("stale"))}</small>${up?`<small class="r-up" title="${esc(`${t("spaceStarted")} ${date(up.startedAt)}`)}">${uptimeText(up,lang,Date.now(),fresh).split(" · ").map(x=>`<span>${esc(x)}</span>`).join(" · ")}</small>`:""}</td>`;
     const checksCell=`<td class="r-checks"><span class="cl">${t("checksCol")}</span>${fresh?`<span class="frac">${ok}<span class="sp-unit"> / ${all.length}</span></span><small>${t("healthyRatio")}</small>`:`<span class="frac muted">—</span>`}</td>`;
     if(!r)return `<tr data-machine="${esc(m.name)}" class="${fresh?"":"stale"}" ${machine===m.name?'aria-selected="true"':""}>${name}${checksCell}<td colspan="4" class="r-none">${t("resourcesEmpty")}</td></tr>`;
     const load=r.load?`<span class="pct">${r.load.one}</span><small>${r.load.five} · ${r.load.fifteen}</small>`:`<span class="pct">—</span>`;
