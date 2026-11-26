@@ -1,4 +1,4 @@
-import type { Check, HostResources, Incident, Inspection, PeerPolicy, PeerView, Report, ReportItem, Rule, ScanRecord, Settings, Severity, Snapshot, Status, TaskPolicy } from "../src/types.ts";
+import { notices, type Check, type HostResources, type Incident, type Inspection, type PeerPolicy, type PeerView, type Report, type ReportItem, type Rule, type ScanRecord, type Settings, type Severity, type Snapshot, type Status, type TaskPolicy } from "../src/types.ts";
 import { markdown } from "./markdown.ts";
 import { roomScene, bindRoom, type RackMachine } from "./room.ts";
 import { t, tn, lang, setLang, ago, until, date, type Key } from "./i18n.ts";
@@ -225,6 +225,7 @@ ${offline?banner():""}
 <div class="head-stats">${stats.map(([k,n,go])=>`<button type="button" class="hs" data-goto="${go}"><span class="sp-unit">${t(k)}</span><b>${n}</b></button>`).join("")}</div></div>
 <div class="hero-chart">${tileHead(t("recentActivity"))}<div class="scan-history">${history.length?history.map(h=>{const total=Math.max(1,h.passing+h.failing+h.unknown+(h.transient??0));return `<button type="button" data-scan="${esc(h.at)}" data-host="${esc(historyHost)}" title="${esc(date(h.at))} · ${h.passing}/${total}" aria-label="${t("scanAt")} ${esc(date(h.at))}" class="scan-bar ${h.failing?"fail":h.transient?"oneoff":h.unknown?"unknown":""}" style="--h:${Math.max(10,100*h.passing/total)}%"></button>`;}).join(""):`<p class="sp-hint">${t("noHistory")}</p>`}</div>
 <div class="history-axis"><span>${history[0]?ago(history[0].at):"—"}</span><span class="scan-legend"><span><span class="sp-dot ok"></span>${t("scanOk")}</span><span><span class="sp-dot warn"></span>${t("scanOneOff")}</span><span><span class="sp-dot bad"></span>${t("scanFail")}</span><span><span class="sp-dot none"></span>${t("scanUnknown")}</span></span><span>${t("historyHint")}</span></div></section>
+${backupBanner(snapshots)}
 <section class="sp-tile pad">${tileHead(t("attention"),attention.length>6?viewAll("checks:attention"):"")}${rows(attention.slice(0,6).map(c=>checkRow(c,{time:ago(c.failedAt??c.observedAt),acts:attentionActs(c),selected:!!incidentOf(c)&&incidentOf(c)===inAside})),t("attentionEmpty"),"shield")}</section>
 ${sectionHead(t("watching"),t("watchingSub"))}
 <section class="sp-tile pad"><div class="tabs-h"><div class="tabs" role="tablist" aria-label="${t("watching")}">${signals.map(x=>`<button type="button" role="tab" aria-selected="${x===sig}" data-signal="${x.k}">${x.label}<span class="n">${x.n}</span></button>`).join("")}</div>${sig.more}</div><div role="tabpanel">${sig.body}</div></section>
@@ -232,6 +233,8 @@ ${sectionHead(t("machines"),t("machinesSub"))}
 ${resourcesTile(snapshots)}
 <div class="sp-banner coverage">${icon("shield")}<div class="grow"><strong>${t("coverageTitle")}</strong><p>${t("coverageDesc")}</p></div><button type="button" class="sp-btn sm" id="coverage-new">${icon("plus")}${t("newCheck")}</button></div>`;
 }
+/** The machines in view without a backup destination: one neutral reminder, never a fault or a count. */
+function backupBanner(snapshots:{name:string;snapshot:Snapshot|null}[]){const off=snapshots.filter(m=>m.snapshot&&notices(m.snapshot).length).map(m=>m.name);return off.length?`<div class="sp-banner" role="note">${icon("info")}<div class="grow"><strong>${t("backupUnconfigured")}</strong><p>${esc(off.join(", "))} · ${t("backupUnconfiguredHint")}</p></div></div>`:"";}
 /** Bytes in GB (or MB under one GB), one decimal. */
 function bytes(n:number){return n>=1e9?`${(n/1e9).toFixed(1)} GB`:`${Math.round(n/1e6)} MB`;}
 function meter(percent:number|undefined,threshold:number,fresh:boolean,detail:string){

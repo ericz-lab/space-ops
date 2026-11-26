@@ -1,8 +1,8 @@
 import { ruleActive, pendingDeadline } from "./rules.ts";
 import { Store } from "./store.ts";
 import { declared, inspect } from "./inspections.ts";
-import { declaredNoop, hostSamples, httpProbe, readHostResources, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type CpuTicks, type Task } from "./probes.ts";
-import { SLEEP_HOURS, type Check, type PeerPolicy, type PeerView, type Sample, type Snapshot, type TaskPolicy } from "./types.ts";
+import { backupConfigured, backupSample, declaredNoop, hostSamples, httpProbe, isBackupTask, lastSuccess, readHostResources, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type CpuTicks, type Task } from "./probes.ts";
+import { SLEEP_HOURS, type BackupState, type Check, type PeerPolicy, type PeerView, type Sample, type Snapshot, type TaskPolicy } from "./types.ts";
 
 export class Engine {
   private running: Promise<void> | null = null;
@@ -46,15 +46,24 @@ export class Engine {
       source("tasks", async () => {
         const d = await get("/api/tasks"); if (!Array.isArray(d.tasks)) throw new Error("Invalid tasks response");
         const tasks = (d.tasks as Task[]).filter(t=>t.enabled && !t.orphaned);
+        // Without a backup destination Space registers no backup task: a reminder, not a fault (BACKUP_UNCONFIGURED).
+        this.store.put("meta","backup",{configured:backupConfigured(d.tasks as Task[]),tasks:tasks.filter(isBackupTask).length,observedAt:new Date(now).toISOString()} satisfies BackupState);
         // The list answered: a task check whose task is gone, orphaned or disabled is retired, not left unknown forever.
         const live = new Set(tasks.map(t=>`task:${t.id}`));
         for (const c of this.store.list<Check>("check")) if (c.kind === "task" && !live.has(c.id)) this.store.retire(c.id,"Task is no longer declared or is disabled; check retired",now);
         await pool(tasks, 4, async t => {
-          let s = taskSample(t,settings,now,this.store.get<TaskPolicy>("taskPolicy",t.id) ?? {});
+          const policy = this.store.get<TaskPolicy>("taskPolicy",t.id) ?? {};
+          let s = taskSample(t,settings,now,policy), runs: Promise<any> | undefined;
+          const history = () => runs ??= get(`/api/tasks/${encodeURIComponent(t.id)}/runs?limit=50`);
           if (t.state.lastStatus === "skipped") {
-            try { const r = await get(`/api/tasks/${encodeURIComponent(t.id)}/runs?limit=50`); const noop = Array.isArray(r.runs) && r.runs[0] ? declaredNoop(r.runs[0]) : undefined;
+            try { const r = await history(); const noop = Array.isArray(r.runs) && r.runs[0] ? declaredNoop(r.runs[0]) : undefined;
               if (noop) s = { ...s,verdict:"pass",transient:undefined,failAfter:undefined,code:"task_noop",detail:`Latest execution was skipped by design (${noop})` };
               else if (Array.isArray(r.runs) && repeatedSkip(r.runs,now)) s = { ...s,verdict:"fail",transient:false,code:"task_repeated_skip",detail:"Three consecutive executions were skipped and none succeeded in 24 hours" }; } catch { /* Keep the unknown result when history is unavailable. */ }
+          }
+          if (isBackupTask(t)) {
+            let lastOk: number | null | undefined = t.state.lastStatus === "ok" && t.state.lastRunAt ? Date.parse(t.state.lastRunAt) + (t.state.lastDurationMs ?? 0) : undefined;
+            if (lastOk === undefined && t.state.lastRunAt) try { const r = await history(); if (Array.isArray(r.runs)) lastOk = lastSuccess(r.runs); } catch { /* Unknown: failure still counts, staleness waits for the history. */ }
+            s = backupSample(s,t,lastOk,now,policy);
           }
           taskSamples.push(s);
         });

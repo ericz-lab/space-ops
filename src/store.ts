@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { validInstant } from "./rules.ts";
-import { DEFAULT_SETTINGS, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerPolicy, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Severity, type Snapshot, type Rule } from "./types.ts";
+import { DEFAULT_SETTINGS, type BackupState, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerPolicy, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Severity, type Snapshot, type Rule } from "./types.ts";
 
 const RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 
@@ -203,7 +203,9 @@ export class Store {
     const inspections = this.list<Inspection>("inspection").map(i => now - Date.parse(i.observedAt) > staleAfterMs ? { ...i, state: "unknown" as const, detail: "Reading expired; awaiting a fresh scan" } : i);
     // Measured numbers travel with their sample time; a reader judges freshness by it and by lastScanAt.
     const resources = this.get<HostResources>("meta", "resources");
-    return { version: 1, machine, collector: this.collectorId(), generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections, ...(resources ? { resources } : {}) };
+    // Whether backups have a destination, as the task list last said; past the lease it is not known, so no reminder.
+    const backup = this.get<BackupState>("meta", "backup"), backupFresh = !!backup && now - Date.parse(backup.observedAt) <= staleAfterMs;
+    return { version: 1, machine, collector: this.collectorId(), generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections, ...(resources ? { resources } : {}), ...(backupFresh ? { backup } : {}) };
   }
   /** One inspection reading; `doneAt` remembers the last reading that was done. */
   putInspection(reading: Omit<Inspection, "doneAt">) {
