@@ -1,7 +1,7 @@
 import { validateRule } from "./rules.ts";
 import type { Engine } from "./engine.ts";
 import type { Diagnosis } from "./diagnose.ts";
-import type { Check, PeerPolicy, Settings, Snapshot, TaskPolicy } from "./types.ts";
+import { BACKUP_UNCONFIGURED, notices, type Check, type PeerPolicy, type Settings, type Snapshot, type TaskPolicy } from "./types.ts";
 
 export function api(engine: Engine, diagnosis?: Diagnosis) {
   const store = engine.store;
@@ -23,7 +23,8 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
       const policies = (kind:string)=>Object.fromEntries((store.db.query("SELECT id,body FROM documents WHERE kind=?").all(kind) as {id:string;body:string}[]).map(r=>[r.id,JSON.parse(r.body)]));
       if (path === "/healthz") { const last=store.get<number>("meta","scan"); const ok=!!last && Date.now()-last<engine.leaseMs(); return json({ok,lastScanAt:last?new Date(last).toISOString():null},ok?200:503); }
       if (req.method === "GET" && path === "/api/snapshot") return json(engine.snapshot());
-      if (req.method === "GET" && path === "/api/dashboard") return json({ok:true,local:engine.snapshot(),peers:engine.peers(),rules:store.rules(),settings:store.settings(),taskPolicies:policies("taskPolicy"),peerPolicies:policies("peerPolicy"),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken});
+      // `notices`: every machine's reminders (a backup destination not configured), never counted as checks.
+      if (req.method === "GET" && path === "/api/dashboard") { const local=engine.snapshot(),peers=engine.peers(); return json({ok:true,local,peers,notices:[{machine:local.machine,snapshot:local as Snapshot|null},...peers.map(p=>({machine:p.name,snapshot:p.snapshot}))].flatMap(m=>m.snapshot?notices(m.snapshot).map(n=>({machine:m.machine,...n})):[]),rules:store.rules(),settings:store.settings(),taskPolicies:policies("taskPolicy"),peerPolicies:policies("peerPolicy"),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken}); }
       if (req.method === "GET" && path === "/api/widget") return json(widget(engine.snapshot()));
       if (req.method === "GET" && path.startsWith("/api/checks/")) { const id=decodeURIComponent(path.slice(12)); return json({ok:true,check:store.get<Check>("check",id),history:store.history(id)}); }
       // This machine only, never its peers: a hub reads it through the Space peer proxy, so evidence does not fan out.
@@ -39,6 +40,15 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
       if (req.method === "POST" && path === "/api/scan") { void engine.scan().catch(()=>{}); return json({ok:true},202); }
       if (req.method === "POST" && path === "/api/rules") { const rule=validateRule(await body()); if(store.rules().length>=100) throw new Error("At most 100 custom rules");store.put("rule",rule.id,rule);void engine.scan().catch(()=>{});return json({ok:true,rule},201); }
       if (path.startsWith("/api/rules/") && req.method === "PUT") { const id=decodeURIComponent(path.slice(11));if(!store.get("rule",id))return json({ok:false,error:"Rule not found"},404);const rule=validateRule(await body(),id);store.put("rule",id,rule);store.db.query("DELETE FROM documents WHERE kind='check' AND id=?").run(id);void engine.scan().catch(()=>{});return json({ok:true,rule}); }
+      const forgetPath=req.method === "POST" ? path.match(/^\/api\/checks\/([^/]+)\/forget$/) : null;
+      if (forgetPath) {
+        // A check whose resource left the machine for good stays not_observed forever; an operator forgets it. One still observed is refused.
+        const id=decodeURIComponent(forgetPath[1]!), c=store.get<Check>("check",id);
+        if (!c) return json({ok:false,error:"Check not found"},404);
+        if (c.code !== "not_observed") return json({ok:false,error:"Check is still observed; only a check whose resource is no longer observed can be forgotten"},409);
+        const {incident}=store.forget(id,(req.headers.get("cf-access-authenticated-user-email")??"").slice(0,200)||undefined);
+        return json({ok:true,id,resolvedIncident:incident});
+      }
       if (path.startsWith("/api/checks/") && req.method === "PATCH") {
         const id=decodeURIComponent(path.slice(12)), b=await body(), patch:{enabled?:boolean;mutedUntil?:string|null}={};
         if (typeof b.enabled === "boolean") patch.enabled=b.enabled;
@@ -106,7 +116,9 @@ export function widget(s: Snapshot) {
   const serious=s.checks.filter(c=>c.status==="failing"&&c.severity!=="info").length;
   const open=s.incidents.filter(i=>i.status!=="resolved"), critical=open.some(i=>i.severity==="critical"), asking=open.some(i=>i.severity!=="info");
   const tone=(i:{severity:string})=>i.severity==="critical"?"negative":i.severity==="info"?"neutral":"warning";
-  const items=[{text:`${s.machine}: ${healthy}/${s.checks.length} checks healthy${transient?` · ${transient} one-off`:""}`,url:"/",time:s.generatedAt},...open.slice(0,4).map(i=>({text:i.name,url:"/#incidents",time:i.openedAt}))];
+  // A machine without a backup destination: one neutral reminder, in the words of every other surface, never a count.
+  const unconfigured=notices(s).some(n=>n.code===BACKUP_UNCONFIGURED.code);
+  const items=[{text:`${s.machine}: ${healthy}/${s.checks.length} checks healthy${transient?` · ${transient} one-off`:""}`,url:"/",time:s.generatedAt},...(unconfigured?[{text:`${s.machine}: ${BACKUP_UNCONFIGURED.en}`,url:"/"}]:[]),...open.slice(0,4).map(i=>({text:i.name,url:"/#incidents",time:i.openedAt}))];
   const blocks=[
     {type:"progress",label:{en:`Healthy checks · ${s.machine}`,zh:`健康检查 · ${s.machine}`},value:healthy,max:Math.max(s.checks.length,1),display:`${healthy}/${s.checks.length}`,tone:healthy===s.checks.length?"positive":serious?"negative":"warning",url:"/"},
     {type:"metric",label:{en:"Open incidents",zh:"未结事件"},value:open.length,tone:!open.length?"positive":critical?"negative":asking?"warning":"neutral",url:"/#incidents"},
@@ -114,6 +126,7 @@ export function widget(s: Snapshot) {
     {type:"metric",label:{en:"Failing",zh:"失败"},value:failing,tone:serious?"negative":failing?"warning":"neutral"},
     {type:"metric",label:{en:"One-off",zh:"偶发"},value:transient,caption:{en:"failed once, not yet confirmed",zh:"单次失败，尚未确认"},tone:transient?"warning":"neutral"},
     {type:"metric",label:{en:"Unknown",zh:"未知"},value:unknown},
+    ...(unconfigured?[{type:"status",label:{en:"Backups",zh:"备份"},value:{en:BACKUP_UNCONFIGURED.en,zh:BACKUP_UNCONFIGURED.zh},caption:BACKUP_UNCONFIGURED.hint,tone:"neutral",url:"/"}]:[]),
     ...open.slice(0,6).map(i=>({type:"status",label:i.app,value:i.name,time:i.openedAt,tone:tone(i),url:"/#incidents"})),
   ];
   return {ok:true,items,asOf:s.lastScanAt??s.generatedAt,staleAfter:Math.round(s.staleAfterMs/1000),blocks};

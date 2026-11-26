@@ -60,7 +60,7 @@ export async function httpProbe(rule: Rule, fetcher: typeof fetch = fetch, now =
     return { ...base, evidenceAt, ...assertionsResult(data, rule.assertions, now, rule.timezone, rule.weekdays), latencyMs: Math.round(performance.now()-started) };
   } catch (e) { return { ...base, verdict: "fail", code: "http_unreachable", detail: e instanceof Error && e.name === "TimeoutError" ? "Probe exceeded its timeout" : "Connection failed, redirected, or timed out", latencyMs: Math.round(performance.now()-started) }; }
 }
-export type Task = { id: string; app: string; name: string; enabled: boolean; orphaned: boolean; timeoutMs: number; state: { runningAt?: string; nextRunAt?: string; lastRunAt?: string; lastDurationMs?: number; lastStatus?: string; consecutiveErrors?: number; pending?: { dueAt: string; deadlineAt?: string } } };
+export type Task = { id: string; app: string; name: string; enabled: boolean; orphaned: boolean; timeoutMs: number; createdAt?: string; state: { runningAt?: string; nextRunAt?: string; lastRunAt?: string; lastDurationMs?: number; lastStatus?: string; consecutiveErrors?: number; pending?: { dueAt: string; deadlineAt?: string } } };
 export function taskSample(t: Task, settings: Settings, now = Date.now(), policy: TaskPolicy = {}): Sample {
   const s = t.state, errorThreshold = policy.errorThreshold ?? settings.taskErrorThreshold, deadlineMs = (policy.deadlineMinutes ?? 0) * 60_000;
   const base: Sample = { id: `task:${t.id}`, name: `${t.app} / ${t.name}`, app: t.app, kind: "task", verdict: "pass", code: "task_ok", detail: "Execution status only; business output is not verified", coverage: "execution", evidenceAt: s.lastRunAt };
@@ -79,6 +79,29 @@ export function taskSample(t: Task, settings: Settings, now = Date.now(), policy
   if (s.lastStatus === "skipped") return { ...base, verdict: "unknown", transient: true, code: "task_skipped", detail: "Latest execution was skipped; cleared by the next completed run" };
   if (!s.lastRunAt) return { ...base, verdict: "unknown", code: "task_never_run", detail: "No completed execution has been observed" };
   return base;
+}
+/** Space's own backup tasks (ai-space docs/backup.md): one `backup` per app, and the weekly `backup-verify` owned by `space`. */
+export function isBackupTask(t: Pick<Task, "app" | "name">): boolean { return t.name === "backup" || (t.app === "space" && t.name === "backup-verify"); }
+/** A backup destination is configured when Space registered its own backup tasks: without one it registers none, and an earlier one is orphaned. */
+export function backupConfigured(tasks: Pick<Task, "app" | "name" | "orphaned">[]): boolean { return tasks.some(t => t.app === "space" && isBackupTask(t) && !t.orphaned); }
+/** When the latest successful run ended, from a run history newest first; null when none of these runs succeeded. */
+export function lastSuccess(runs: TaskRun[]): number | null { const ok = runs.find(r => r.status === "ok"), at = ok?.endedAt ?? ok?.startedAt; return Number.isFinite(at) ? at! : null; }
+/**
+ * A backup is a fault as soon as it does not complete: its latest run failed (unless the operator set this task's own
+ * error threshold), or nothing succeeded within twice its schedule interval (next run minus last run) plus its timeout,
+ * 48.5 h for a daily backup. `lastOkAt`: end of the latest successful run; null = none on record (counted from the
+ * task's creation); undefined = unknown (the run history did not answer). Overdue, stalled and running results stand.
+ * Instants, not ages, so an open incident gains an event only when something changes.
+ */
+export function backupSample(s: Sample, t: Task, lastOkAt: number | null | undefined, now = Date.now(), policy: TaskPolicy = {}): Sample {
+  if (!isBackupTask(t) || !["task_ok", "task_errors", "task_skipped", "task_noop", "task_repeated_skip"].includes(s.code)) return s;
+  const what = t.name === "backup" ? "backup" : "backup verification", st = t.state;
+  const last = lastOkAt ? `last successful run ${new Date(lastOkAt).toISOString().slice(0, 16)}Z` : lastOkAt === null ? "no successful run on record" : "last successful run unknown";
+  const period = validInstant(st.nextRunAt) && validInstant(st.lastRunAt) ? Date.parse(st.nextRunAt) - Date.parse(st.lastRunAt) : NaN, window = period * 2 + t.timeoutMs;
+  const since = lastOkAt ?? (lastOkAt === null && validInstant(t.createdAt) ? Date.parse(t.createdAt) : NaN);
+  if (period > 0 && Number.isFinite(since) && now - since > window) return { ...s, verdict: "fail", transient: false, failAfter: 1, code: "backup_stale", detail: `No successful ${what} within ${Math.round(window / 3_600_000)} h (twice its schedule interval plus its timeout); ${last}`, value: now - since, threshold: window };
+  if (st.lastStatus === "error" && !policy.errorThreshold) { const n = st.consecutiveErrors ?? 1; return { ...s, verdict: "fail", transient: false, failAfter: 1, code: "backup_failed", detail: `Latest ${what} run failed (${n} in a row); ${last}`, value: n, threshold: 1 }; }
+  return s;
 }
 // A no-op run ("inputs unchanged") is normal for a polling task; skips count only once nothing has succeeded for a day.
 export type TaskRun = { status: string; startedAt?: number; endedAt?: number; error?: string; output?: string };

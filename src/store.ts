@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { validInstant } from "./rules.ts";
-import { DEFAULT_SETTINGS, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerPolicy, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Severity, type Snapshot, type Rule } from "./types.ts";
+import { DEFAULT_SETTINGS, type BackupState, type Check, type HostResources, type Incident, type Inspection, type IncidentEvent, type PeerPolicy, type PeerView, type Report, type ReportItem, type Sample, type ScanRecord, type Settings, type Severity, type Snapshot, type Rule } from "./types.ts";
 
 const RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
 
@@ -93,6 +93,21 @@ export class Store {
     const i = this.activeIncident(id), at = new Date(now).toISOString();
     if (i && i.source !== "manual") { i.status = "resolved"; i.resolvedAt = at; i.resolvedBy = "retired"; i.updatedAt = at; i.events.push({ at, type: "resolved", detail }); this.put("incident", i.id, i); }
     this.db.query("DELETE FROM documents WHERE kind IN ('check','control') AND id=?").run(id);
+  }
+  /**
+   * An operator forgets a check whose resource is gone for good (an app moved to another machine). Only a check no scan
+   * observes any more (`not_observed`, paused or not): one still observed would only come back. Its open incident,
+   * automatic or an operator's, is resolved by that operator; incidents and observations stay as history.
+   */
+  forget(id: string, by?: string, now = Date.now()): { check: Check; incident: string | null } {
+    return this.db.transaction(() => {
+      const c = this.get<Check>("check", id); if (!c) throw new Error("Check not found");
+      if (c.code !== "not_observed") throw new Error("Check is still observed; only a check whose resource is no longer observed can be forgotten");
+      const i = this.activeIncident(id), at = new Date(now).toISOString();
+      if (i) { i.status = "resolved"; i.resolvedAt = at; i.updatedAt = at; i.resolvedBy = by || "operator"; i.events = trimEvents([...i.events, { at, type: "resolved", detail: "Check forgotten by an operator: its resource is no longer observed", by: by || "operator" }]); this.put("incident", i.id, i); }
+      this.db.query("DELETE FROM documents WHERE kind IN ('check','control') AND id=?").run(id);
+      return { check: c, incident: i?.id ?? null };
+    })();
   }
   acknowledge(id: string, now = Date.now(), by?: string) {
     const i = this.get<Incident>("incident", id); if (!i) throw new Error("Incident not found");
@@ -203,7 +218,9 @@ export class Store {
     const inspections = this.list<Inspection>("inspection").map(i => now - Date.parse(i.observedAt) > staleAfterMs ? { ...i, state: "unknown" as const, detail: "Reading expired; awaiting a fresh scan" } : i);
     // Measured numbers travel with their sample time; a reader judges freshness by it and by lastScanAt.
     const resources = this.get<HostResources>("meta", "resources");
-    return { version: 1, machine, collector: this.collectorId(), generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections, ...(resources ? { resources } : {}) };
+    // Whether backups have a destination, as the task list last said; past the lease it is not known, so no reminder.
+    const backup = this.get<BackupState>("meta", "backup"), backupFresh = !!backup && now - Date.parse(backup.observedAt) <= staleAfterMs;
+    return { version: 1, machine, collector: this.collectorId(), generatedAt: new Date(now).toISOString(), lastScanAt: last ? new Date(last).toISOString() : null, staleAfterMs, checks, incidents, history, inspections, ...(resources ? { resources } : {}), ...(backupFresh ? { backup } : {}) };
   }
   /** One inspection reading; `doneAt` remembers the last reading that was done. */
   putInspection(reading: Omit<Inspection, "doneAt">) {

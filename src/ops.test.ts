@@ -4,10 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "./store.ts";
 import { assertionsResult, field, validateRule } from "./rules.ts";
-import { declaredNoop, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
+import { backupConfigured, backupSample, declaredNoop, httpProbe, readJson, repeatedSkip, taskSample, withRecoveryEvidence, type Task } from "./probes.ts";
 import { Engine, peerDown, renames, tunnelClosed } from "./engine.ts";
 import { api, widget } from "./api.ts";
-import { DEFAULT_SETTINGS, type DeclaredCheck, type PeerView, type Sample } from "./types.ts";
+import { BACKUP_UNCONFIGURED, DEFAULT_SETTINGS, type DeclaredCheck, type PeerView, type Sample, type Snapshot } from "./types.ts";
+import { snapshotEvidence } from "./diagnose.ts";
 import { declared, evaluate, inspect } from "./inspections.ts";
 
 const stores:Store[]=[];
@@ -723,4 +724,90 @@ test("daily rules wait before fetching or checking exists/ok and preserve incide
   const success=await httpProbe(rule,mockFetch(()=>({items:[{ok:true,finishedAt:"2026-10-20T06:00:00Z"}]})),deadline);
   expect(s.observe(success,deadline).status).toBe("healthy");
   expect(s.activeIncident(rule.id)).toBeUndefined();
+});
+
+describe("Backups",()=>{
+  const now=Date.parse("2026-11-25T12:00:00Z"),iso=(ms:number)=>new Date(ms).toISOString(),H=3600_000;
+  const backup=(app:string,state:Task["state"],extra:Partial<Task>={}):Task=>({id:`b-${app}`,app,name:"backup",enabled:true,orphaned:false,timeoutMs:1800_000,createdAt:"2026-11-01T00:00:00Z",state,...extra});
+  const verify:Task={id:"verify",app:"space",name:"backup-verify",enabled:true,orphaned:false,timeoutMs:3600_000,state:{lastStatus:"ok",lastRunAt:iso(now-2*24*H),nextRunAt:iso(now+5*24*H),lastDurationMs:60_000}};
+  const daily=(lastStatus:string,consecutiveErrors=0)=>({lastStatus,lastRunAt:iso(now-2*H),lastDurationMs:5000,nextRunAt:iso(now+22*H),consecutiveErrors});
+  test("a destination is configured when Space registered its own backup tasks",()=>{
+    expect(backupConfigured([])).toBe(false);
+    expect(backupConfigured([backup("news",daily("ok"))])).toBe(false);
+    expect(backupConfigured([{...verify,orphaned:true}])).toBe(false);
+    expect(backupConfigured([verify])).toBe(true);
+    expect(backupConfigured([{...backup("space",daily("ok"))}])).toBe(true);
+  });
+  test("a backup whose latest run failed is a fault at once; a stale one too; an operator threshold still applies",()=>{
+    const failed=backup("news",daily("error",1)),s=taskSample(failed,DEFAULT_SETTINGS,now);
+    expect(s).toMatchObject({verdict:"unknown",transient:true});
+    expect(backupSample(s,failed,now-26*H,now)).toMatchObject({verdict:"fail",transient:false,failAfter:1,code:"backup_failed",detail:"Latest backup run failed (1 in a row); last successful run 2026-11-24T10:00Z"});
+    expect(backupSample(s,failed,now-26*H,now,{errorThreshold:3})).toBe(s);
+    // Twice the daily interval plus the timeout: 48.5 h. Past it, stale wins over the failure, policy or not.
+    const stale=backupSample(s,failed,now-49*H,now,{errorThreshold:3});
+    expect(stale).toMatchObject({verdict:"fail",failAfter:1,code:"backup_stale",detail:"No successful backup within 49 h (twice its schedule interval plus its timeout); last successful run 2026-11-23T11:00Z"});
+    // Nothing succeeded on record: counted from the task's creation. Unknown history never counts as stale.
+    expect(backupSample(s,failed,null,now).code).toBe("backup_stale");
+    expect(backupSample(s,failed,undefined,now)).toMatchObject({code:"backup_failed",detail:"Latest backup run failed (1 in a row); last successful run unknown"});
+    const ok=backup("news",daily("ok"));expect(backupSample(taskSample(ok,DEFAULT_SETTINGS,now),ok,now-2*H,now).code).toBe("task_ok");
+    // Overdue, running and other tasks keep their own result.
+    const overdue=backup("news",{...daily("error",1),nextRunAt:iso(now-H)});expect(backupSample(taskSample(overdue,DEFAULT_SETTINGS,now),overdue,now-49*H,now).code).toBe("task_overdue");
+    const other={...failed,name:"sync"};expect(backupSample(s,other,null,now)).toBe(s);
+    const store1=store();expect(store1.observe(backupSample(s,failed,now-26*H,now),now).status).toBe("failing");expect(store1.activeIncident("task:b-news")).toBeDefined();
+  });
+  function space(tasks:Task[],runs:unknown[]=[]){return mockFetch(url=>url.includes("/runs")?{runs}:url.endsWith("/api/tasks")?{tasks}:url.endsWith("services")?{services:[]}:url.endsWith("/api/checks")?{checks:[]}:{peers:[]});}
+  const engine=(s:Store,f:typeof fetch)=>new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},f);
+  test("without a destination: one reminder on the snapshot, dashboard, panel card and evidence, never a check or a count",async()=>{
+    const s=store(),e=engine(s,space([]));await e.scan();
+    const snap=e.snapshot();expect(snap.backup).toMatchObject({configured:false,tasks:0});
+    // No check stands for it: the totals count the checks only (host CPU waits for its second sample here).
+    expect(snap.checks.filter(c=>/backup/.test(c.id+c.code+c.name))).toHaveLength(0);expect(snap.incidents).toHaveLength(0);
+    expect(snap.history.at(-1)).toMatchObject({failing:0,unknown:snap.checks.filter(c=>c.status==="unknown").length});
+    const dash=await (await api(e)(new Request("http://ops.test/api/dashboard"))).json() as {notices:unknown[]};
+    expect(dash.notices).toEqual([{machine:"local",code:"backup_not_configured",text:"Backup destination not configured",hint:BACKUP_UNCONFIGURED.hint.en}]);
+    const w=widget(snap);
+    expect(w.items.map(i=>i.text)).toContain("local: Backup destination not configured");
+    expect(w.blocks.find(b=>b.type==="status")).toMatchObject({label:{en:"Backups",zh:"备份"},value:{en:"Backup destination not configured",zh:"未配置备份目的地"},tone:"neutral"});
+    expect(w.blocks[1]).toMatchObject({type:"metric",value:0,tone:"positive"});
+    expect(snapshotEvidence(snap,"local").parts.join("\n")).toContain("## Reminders (not faults, not counted in the checks)\n- Backup destination not configured (backup_not_configured)");
+    // A peer's snapshot carries it too; one that predates it, or whose task list is not current, has no reminder.
+    expect(widget({...snap,backup:undefined} as Snapshot).items).toHaveLength(1);
+    expect(s.snapshot("local",Date.now()+10*60_000,240_000).backup).toBeUndefined();
+  });
+  test("with a destination: no reminder, and a failed backup opens an incident on the first scan",async()=>{
+    const recent=Date.now(),tasks=[verify,{...backup("news",{lastStatus:"error",lastRunAt:new Date(recent-H).toISOString(),lastDurationMs:5000,nextRunAt:new Date(recent+23*H).toISOString(),consecutiveErrors:1}),createdAt:"2026-11-01T00:00:00Z"}];
+    const s=store(),e=engine(s,space(tasks,[{status:"error",startedAt:recent-H},{status:"ok",startedAt:recent-25*H,endedAt:recent-25*H+5000}]));await e.scan();
+    const snap=e.snapshot();expect(snap.backup).toMatchObject({configured:true,tasks:2});
+    expect(widget(snap).blocks.some(b=>JSON.stringify(b.label).includes("Backups"))).toBe(false);
+    expect(s.get<{status:string;code:string}>("check","task:b-news")).toMatchObject({status:"failing",code:"backup_failed"});
+    expect(s.activeIncident("task:b-news")?.detail).toBe(`Latest backup run failed (1 in a row); last successful run ${new Date(recent-25*H+5000).toISOString().slice(0,16)}Z`);
+    expect(s.get<CheckLike>("check","task:verify")?.status).toBe("healthy");
+  });
+});
+
+describe("Forgetting a check",()=>{
+  const post=(handler:ReturnType<typeof api>,id:string)=>handler(new Request(`http://ops.test/api/checks/${encodeURIComponent(id)}/forget`,{method:"POST",headers:{"content-type":"application/json",origin:"http://ops.test"},body:"{}"}));
+  test("only a check that is no longer observed is forgotten, with its open incident resolved",async()=>{
+    const s=store();let services=[{app:"gone",title:"Gone",status:"active",health:"down"},{app:"here",title:"Here",status:"active",health:"ok"}];
+    const e=new Engine(s,{api:"http://space.test",machine:"local",dataDir:"/tmp",retentionDays:30},mockFetch(url=>url.endsWith("services")?{services}:url.endsWith("tasks")?{tasks:[]}:{peers:[]}));
+    for(let i=0;i<3;i++)await e.scan();
+    const incident=s.activeIncident("service:gone")!;expect(incident).toBeDefined();
+    const handler=api(e);
+    expect((await post(handler,"service:gone")).status).toBe(409);
+    expect((await post(handler,"service:here")).status).toBe(409);
+    expect((await post(handler,"service:nothing")).status).toBe(404);
+    // The app moved off the machine: its check stays not_observed, scan after scan.
+    services=services.filter(x=>x.app!=="gone");await e.scan();await e.scan();
+    expect(s.get<{status:string;code:string}>("check","service:gone")).toMatchObject({status:"unknown",code:"not_observed"});
+    const r=await post(handler,"service:gone");expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ok:true,id:"service:gone",resolvedIncident:incident.id});
+    expect(s.get("check","service:gone")).toBeNull();expect(s.activeIncident("service:gone")).toBeUndefined();
+    expect(s.incident(incident.id)).toMatchObject({status:"resolved",resolvedBy:"operator"});
+    expect(s.incident(incident.id).events.at(-1)).toMatchObject({type:"resolved",detail:"Check forgotten by an operator: its resource is no longer observed"});
+    await e.scan();expect(s.get("check","service:gone")).toBeNull();expect(s.get<CheckLike>("check","service:here")?.status).toBe("healthy");
+    // A paused leftover is forgotten too; a cross-site write is refused before anything changes.
+    services=[];await e.scan();s.control("service:here",{enabled:false});
+    expect((await handler(new Request("http://ops.test/api/checks/service%3Ahere/forget",{method:"POST",headers:{"content-type":"application/json",origin:"https://evil.test"},body:"{}"}))).status).toBe(403);
+    expect((await post(handler,"service:here")).status).toBe(200);expect(s.get("check","service:here")).toBeNull();
+  });
 });

@@ -1,6 +1,6 @@
 import type { Engine } from "./engine.ts";
 import { readJson } from "./probes.ts";
-import type { Check, Coverage, PeerView, Report, ReportVerdict, Snapshot } from "./types.ts";
+import { notices, type Check, type Coverage, type PeerView, type Report, type ReportVerdict, type Snapshot } from "./types.ts";
 
 /**
  * One-click diagnosis (一键排查). Space Ops gathers the evidence it can read on this machine, bounded,
@@ -38,6 +38,10 @@ export function snapshotEvidence(snap: Snapshot, machine: string, now = Date.now
   if (running.length) parts.push(`## Tasks running now, within their deadline (counted as unknown, not a fault)\n${running.slice(0, 20).map(c => `- ${c.name} (${c.app})`).join("\n")}`);
   const paused = checks.filter(c => c.status === "paused");
   if (paused.length) parts.push(`## Paused checks (not observed)\n${paused.slice(0, 20).map(c => `- ${c.name} (${c.app})`).join("\n")}`);
+
+  // Reminders are configuration, not faults: never a check, never counted above.
+  const reminders = notices(snap);
+  if (reminders.length) parts.push(`## Reminders (not faults, not counted in the checks)\n${reminders.map(n => `- ${n.text} (${n.code}): ${n.hint}`).join("\n")}`);
 
   const open = snap.incidents.filter(i => i.status !== "resolved"), recent = snap.incidents.filter(i => i.status === "resolved" && i.resolvedAt && now - Date.parse(i.resolvedAt) < 86_400_000);
   parts.push(`## Open incidents (${open.length})\n${open.slice(0, 30).map(i => `- [${i.status}, ${i.severity}${i.source === "manual" ? ", opened by an operator" : ""}] ${i.name} (app ${i.app}, check ${i.checkId}) since ${i.openedAt}\n  ${clip(i.detail, 400)}\n${i.events.slice(-4).map(e => `  · ${e.at} ${e.type}: ${clip(e.detail, 300)}`).join("\n")}`).join("\n") || "None."}\n\n## Incidents resolved in the last 24 hours (${recent.length})\n${recent.slice(0, 15).map(i => `- ${i.name} (app ${i.app}) ${i.openedAt} → ${i.resolvedAt} by ${i.resolvedBy ?? "?"}`).join("\n") || "None."}`);
@@ -126,6 +130,7 @@ Write a fault diagnosis report:
   ## 未完成的检查 / Not checked — every source that was skipped, failed or partial, and what it would take to check it.
 - One-off errors (status transient) are single failures below the incident threshold; mention them, but do not call them faults unless the evidence shows a pattern.
 - Unknown is not healthy: say what is missing.
+- A reminder (such as a backup destination not configured) is not a fault: mention it once in the conclusion, never as a finding, and it alone never makes the verdict issues.
 - Recommend actions only; do not claim anything was repaired. Keep commands generic and mark them as suggestions.
 Write the report in the language the request names.`;
 

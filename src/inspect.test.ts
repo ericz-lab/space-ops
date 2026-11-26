@@ -19,3 +19,10 @@ test("unsupported commands and missing peer configuration fail closed", () => {
   expect(() => inspectionRequest(["peer", "other"], {}, 8998)).toThrow("require");
   expect(() => inspectionRequest(["status"], {}, 0)).toThrow("port");
 });
+
+test("forget is a same-origin JSON write to this machine's collector, with no Space credential", () => {
+  const request = inspectionRequest(["forget", "service:ai-design"], { SPACE_APP_TOKEN: "secret", SPACE_API_URL: "https://space.example/" }, 8998);
+  expect(request).toEqual({ url: "http://127.0.0.1:8998/api/checks/service%3Aai-design/forget", method: "POST", headers: { origin: "http://127.0.0.1:8998", "content-type": "application/json" }, body: "{}", timeoutMs: 60_000 });
+  expect(inspectionRequest(["status"], {}, 8998).method).toBe("GET");
+  for (const args of [["forget"], ["forget", ""], ["forget", "a", "b"]]) expect(() => inspectionRequest(args, {}, 8998)).toThrow("Usage");
+});

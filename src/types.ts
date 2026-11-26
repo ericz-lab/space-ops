@@ -40,8 +40,26 @@ export type HostResources = {
   memory?: { usedBytes: number; totalBytes: number; availableBytes: number; percent: number; source: "proc" | "kernel" | "os" };
   disk?: { usedBytes: number; totalBytes: number; percent: number; path: string };
 };
+/**
+ * Whether this machine's Space has a backup destination, read from its task list: Space registers its own `backup` and
+ * `backup-verify` tasks only when SPACE_BACKUP_URL (a path or an S3/R2 bucket) is set (ai-space docs/backup.md).
+ * `tasks`: the backup tasks it runs. Absent when the task list has not answered within the scan lease.
+ */
+export type BackupState = { configured: boolean; tasks: number; observedAt: string };
+/** A reminder: shown wherever status is, in the same words, but never a check, an incident or a count. */
+export type Notice = { code: string; text: string; hint: string };
+/** The one reminder for a machine without a backup destination: no backup runs there, so none can fail. */
+export const BACKUP_UNCONFIGURED = {
+  code: "backup_not_configured",
+  en: "Backup destination not configured", zh: "未配置备份目的地",
+  hint: { en: "Set SPACE_BACKUP_URL (a path or an R2 bucket) in the workspace .env and restart Space to back up this machine.", zh: "在工作空间 .env 中设置 SPACE_BACKUP_URL（本机路径或 R2 存储桶）并重启 Space，即可备份这台机器。" },
+} as const;
+/** A snapshot's reminders, in English: the API, the inspect CLI and the diagnosis evidence. The page and the panel card translate them. */
+export function notices(s: Pick<Snapshot, "backup">): Notice[] {
+  return s.backup?.configured === false ? [{ code: BACKUP_UNCONFIGURED.code, text: BACKUP_UNCONFIGURED.en, hint: BACKUP_UNCONFIGURED.hint.en }] : [];
+}
 /** `collector`: the collector's own id (Store.collectorId), the same across renames; absent from older collectors. */
-export type Snapshot = { version: 1; machine: string; collector?: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources };
+export type Snapshot = { version: 1; machine: string; collector?: string; generatedAt: string; lastScanAt: string | null; staleAfterMs: number; checks: Check[]; incidents: Incident[]; history: { at: string; passing: number; failing: number; unknown: number; transient?: number }[]; inspections?: Inspection[]; resources?: HostResources; backup?: BackupState };
 /**
  * `url`: where the snapshot is read; the peer's diagnosis evidence sits next to it. `missingSince`: the
  * Space peer list stopped naming it while a newly named peer could not be read yet, so whether it was
