@@ -1,6 +1,7 @@
 import { validateRule } from "./rules.ts";
 import type { Engine } from "./engine.ts";
 import type { Diagnosis } from "./diagnose.ts";
+import { parseUptime, runSpan, totalSpan, uptimeAt, uptimeText } from "./uptime.ts";
 import { BACKUP_UNCONFIGURED, notices, type Check, type PeerPolicy, type Settings, type Snapshot, type TaskPolicy } from "./types.ts";
 
 export function api(engine: Engine, diagnosis?: Diagnosis) {
@@ -24,7 +25,8 @@ export function api(engine: Engine, diagnosis?: Diagnosis) {
       if (path === "/healthz") { const last=store.get<number>("meta","scan"); const ok=!!last && Date.now()-last<engine.leaseMs(); return json({ok,lastScanAt:last?new Date(last).toISOString():null},ok?200:503); }
       if (req.method === "GET" && path === "/api/snapshot") return json(engine.snapshot());
       // `notices`: every machine's reminders (a backup destination not configured), never counted as checks.
-      if (req.method === "GET" && path === "/api/dashboard") { const local=engine.snapshot(),peers=engine.peers(); return json({ok:true,local,peers,notices:[{machine:local.machine,snapshot:local as Snapshot|null},...peers.map(p=>({machine:p.name,snapshot:p.snapshot}))].flatMap(m=>m.snapshot?notices(m.snapshot).map(n=>({machine:m.machine,...n})):[]),rules:store.rules(),settings:store.settings(),taskPolicies:policies("taskPolicy"),peerPolicies:policies("peerPolicy"),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken}); }
+      // `uptime`: how long each machine's Space has run, in words too (information, never a check); a machine whose Space does not say is left out.
+      if (req.method === "GET" && path === "/api/dashboard") { const local=engine.snapshot(),peers=engine.peers(),machines=[{machine:local.machine,snapshot:local as Snapshot|null,fresh:true},...peers.map(p=>({machine:p.name,snapshot:p.snapshot,fresh:p.status==="healthy"}))]; return json({ok:true,local,peers,notices:machines.flatMap(m=>m.snapshot?notices(m.snapshot).map(n=>({machine:m.machine,...n})):[]),uptime:machines.flatMap(m=>{const u=parseUptime(m.snapshot?.uptime);return u?[{machine:m.machine,...u,text:uptimeText(u,"en",Date.now(),m.fresh)}]:[];}),rules:store.rules(),settings:store.settings(),taskPolicies:policies("taskPolicy"),peerPolicies:policies("peerPolicy"),busy:engine.busy(),reports:store.reports(),diagnosisReady:!!diagnosis?.ready(),scan:{intervalMs:engine.intervalMs(),nextAt:engine.nextScanAt()},notificationQueue:store.db.query("SELECT COUNT(*) AS pending,SUM(CASE WHEN attempts>=10 THEN 1 ELSE 0 END) AS failed FROM outbox").get(),notificationReady:!!engine.config.appToken}); }
       if (req.method === "GET" && path === "/api/widget") return json(widget(engine.snapshot()));
       if (req.method === "GET" && path.startsWith("/api/checks/")) { const id=decodeURIComponent(path.slice(12)); return json({ok:true,check:store.get<Check>("check",id),history:store.history(id)}); }
       // This machine only, never its peers: a hub reads it through the Space peer proxy, so evidence does not fan out.
@@ -118,6 +120,8 @@ export function widget(s: Snapshot) {
   const tone=(i:{severity:string})=>i.severity==="critical"?"negative":i.severity==="info"?"neutral":"warning";
   // A machine without a backup destination: one neutral reminder, in the words of every other surface, never a count.
   const unconfigured=notices(s).some(n=>n.code===BACKUP_UNCONFIGURED.code);
+  // How long this Space has run: one neutral line, never a count (src/uptime.ts).
+  const u=parseUptime(s.uptime),up=u?uptimeAt(u,Date.now(),true):undefined;
   const items=[{text:`${s.machine}: ${healthy}/${s.checks.length} checks healthy${transient?` · ${transient} one-off`:""}`,url:"/",time:s.generatedAt},...(unconfigured?[{text:`${s.machine}: ${BACKUP_UNCONFIGURED.en}`,url:"/"}]:[]),...open.slice(0,4).map(i=>({text:i.name,url:"/#incidents",time:i.openedAt}))];
   const blocks=[
     {type:"progress",label:{en:`Healthy checks · ${s.machine}`,zh:`健康检查 · ${s.machine}`},value:healthy,max:Math.max(s.checks.length,1),display:`${healthy}/${s.checks.length}`,tone:healthy===s.checks.length?"positive":serious?"negative":"warning",url:"/"},
@@ -126,6 +130,7 @@ export function widget(s: Snapshot) {
     {type:"metric",label:{en:"Failing",zh:"失败"},value:failing,tone:serious?"negative":failing?"warning":"neutral"},
     {type:"metric",label:{en:"One-off",zh:"偶发"},value:transient,caption:{en:"failed once, not yet confirmed",zh:"单次失败，尚未确认"},tone:transient?"warning":"neutral"},
     {type:"metric",label:{en:"Unknown",zh:"未知"},value:unknown},
+    ...(up?[{type:"status",label:{en:"Space uptime",zh:"持续运行"},value:{en:runSpan(up.currentMs,"en"),zh:runSpan(up.currentMs,"zh")},caption:{en:`${totalSpan(up.totalMs,"en")} in all · ${up.restarts} restart${up.restarts===1?"":"s"}`,zh:`累计 ${totalSpan(up.totalMs,"zh")} · 重启 ${up.restarts} 次`},tone:"neutral"}]:[]),
     ...(unconfigured?[{type:"status",label:{en:"Backups",zh:"备份"},value:{en:BACKUP_UNCONFIGURED.en,zh:BACKUP_UNCONFIGURED.zh},caption:BACKUP_UNCONFIGURED.hint,tone:"neutral",url:"/"}]:[]),
     ...open.slice(0,6).map(i=>({type:"status",label:i.app,value:i.name,time:i.openedAt,tone:tone(i),url:"/#incidents"})),
   ];

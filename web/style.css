@@ -179,6 +179,7 @@
 .sp-meter.stale i { background:var(--faint) }
 .rt tr.stale .pct,.rt tr.stale .frac { color:var(--muted) }
 .r-none { color:var(--muted);font-size:12px }
+.rt td small.r-up { white-space:normal } .r-up span { white-space:nowrap }  /* breaks only between its parts */
 .cl { display:none }
 @container (max-width: 620px) {
   .rt thead { display:none }
